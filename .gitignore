@@ -1,3 +1,13 @@
 *.so
 *.h
 *.test
+/dist/
+# Never publish populated credentials or local environment files.
+/auth.json
+/auths/
+.env
+.env.*
+!.env.example
+.DS_Store
+__pycache__/
+*.pyc

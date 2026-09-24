@@ -1,0 +1,134 @@
+name: Build and release CommandCode plugin
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v[0-9]*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commandcode-plugin-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Linux / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # Keep checkout and artifact actions on the GitHub runner (they require Node.js).
+    # Only the build runs in Debian 12/glibc, matching the CPA deployment.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF_TYPE" == tag ]]; then
+            version="${REF_NAME#v}"
+          else
+            version="$(cat VERSION)"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Invalid release version: $version" >&2
+            exit 1
+          fi
+          echo "PLUGIN_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Test and build native plugin
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            --env PLUGIN_VERSION \
+            --env EXPECTED_ARCH \
+            golang:1.26-bookworm \
+            bash -euo pipefail -c '
+              test "$(go env GOHOSTARCH)" = "$EXPECTED_ARCH"
+              ./build.sh
+            '
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Verify ELF architecture, ABI loading and embedded version
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 scripts/check-plugin.py \
+            "dist/commandcode-go-${PLUGIN_VERSION}-${EXPECTED_ARCH}.so" \
+            "$PLUGIN_VERSION" "$EXPECTED_ARCH"
+
+      - name: Upload tested plugin
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commandcode-go-${{ matrix.arch }}
+          path: dist/commandcode-go-*-${{ matrix.arch }}.so
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download both tested architectures
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: commandcode-go-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish versioned plugins and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          cd dist
+          arm64="commandcode-go-${version}-arm64.so"
+          amd64="commandcode-go-${version}-amd64.so"
+          test -s "$arm64"
+          test -s "$amd64"
+          sha256sum "$amd64" "$arm64" > SHA256SUMS
+          flags=(--verify-tag --generate-notes --title "CommandCode Go ${version}")
+          if [[ "$version" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          printf '%s\n' \
+            'Linux amd64 / arm64，基于 Debian 12 / glibc 构建，不适用于 Alpine/musl。' \
+            '' \
+            '安装前请使用 SHA256SUMS 校验所选架构的文件。' \
+            "当前 CPA 根据文件名识别插件 ID：安装时请将选中的文件改名为 commandcode-go-v${version}.so。" \
+            '不要将两个架构同时放入插件目录，也不要保留带架构的下载文件名。旧版本请移至插件目录之外备份。' \
+            > RELEASE_NOTES.md
+          # Never silently overwrite assets of an already published version.
+          gh release create "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS \
+            --notes-file RELEASE_NOTES.md "${flags[@]}"

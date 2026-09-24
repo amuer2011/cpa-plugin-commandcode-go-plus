@@ -24,6 +24,8 @@ package plugin
 
 import (
 	"context"
+	_ "embed"
+	"encoding/base64"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -42,7 +44,10 @@ const (
 	upstreamBaseURL = "https://api.commandcode.ai"
 )
 
-const pluginVersion = "1.0.0"
+const pluginVersion = "1.2.4"
+
+//go:embed assets/cmdsymbol-dark.svg
+var commandCodeLogo []byte
 
 // CommandCodeGoPlugin wires model metadata, routing and execution.
 type CommandCodeGoPlugin struct {
@@ -64,7 +69,8 @@ func Build(configYAML []byte) (pluginapi.Plugin, *CommandCodeGoPlugin) {
 	p.router = NewRouter(cfg)
 	desc := pluginapi.Plugin{
 		Metadata: pluginapi.Metadata{
-			Name:    "CommandCode Go Provider",
+			Name:    "CommandCode",
+			Logo:    "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString(commandCodeLogo),
 			Version: pluginVersion,
 			Author:  "speroai",
 			// The host rejects plugins with an empty repository field
@@ -72,6 +78,8 @@ func Build(configYAML []byte) (pluginapi.Plugin, *CommandCodeGoPlugin) {
 			GitHubRepository: "https://github.com/sperictao/cpa-plugin-commandcode-go",
 		},
 		Capabilities: pluginapi.Capabilities{
+			AuthProvider:          p,
+			QuotaProvider:         p,
 			ModelProvider:         p.models,
 			ModelRouter:           p.router,
 			Executor:              p.executor,
@@ -91,7 +99,7 @@ func (p *CommandCodeGoPlugin) StaticModels(ctx context.Context, req pluginapi.St
 	return p.models.StaticModels(ctx, req)
 }
 
-// ModelsForAuth mirrors static models; the key lives in plugin config.
+// ModelsForAuth publishes the models for each managed credential.
 func (p *CommandCodeGoPlugin) ModelsForAuth(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
 	return p.models.ModelsForAuth(ctx, req)
 }
@@ -122,8 +130,8 @@ func (p *CommandCodeGoPlugin) HttpRequest(ctx context.Context, req pluginapi.Exe
 }
 
 var (
-	_ pluginapi.ModelProvider = (*CommandCodeGoPlugin)(nil)
-	_ pluginapi.ModelRouter   = (*CommandCodeGoPlugin)(nil)
+	_ pluginapi.ModelProvider    = (*CommandCodeGoPlugin)(nil)
+	_ pluginapi.ModelRouter      = (*CommandCodeGoPlugin)(nil)
 	_ pluginapi.ProviderExecutor = (*CommandCodeGoPlugin)(nil)
 )
 

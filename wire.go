@@ -32,9 +32,9 @@ type openaiRequest struct {
 // openaiMessage: Content stays raw — its shape varies per role
 // (string | part array | null).
 type openaiMessage struct {
-	Role             string `json:"role"`
-	Content          json.RawMessage `json:"content"`
-	ToolCallID       string          `json:"tool_call_id"`
+	Role             string           `json:"role"`
+	Content          json.RawMessage  `json:"content"`
+	ToolCallID       string           `json:"tool_call_id"`
 	ToolCalls        []openaiToolCall `json:"tool_calls"`
 	ReasoningContent string           `json:"reasoning_content"`
 }
@@ -101,12 +101,12 @@ func (r *openaiRequest) maxTokens() int64 {
 // populated depends on Type: text/reasoning carry Text; tool-call carries
 // ToolCallID/ToolName/Input; tool-result carries ToolCallID/ToolName/Output.
 type ccPart struct {
-	Type       string        `json:"type"`
-	Text       string        `json:"text,omitempty"`
-	ToolCallID string        `json:"toolCallId,omitempty"`
-	ToolName   string        `json:"toolName,omitempty"`
+	Type       string         `json:"type"`
+	Text       string         `json:"text,omitempty"`
+	ToolCallID string         `json:"toolCallId,omitempty"`
+	ToolName   string         `json:"toolName,omitempty"`
 	Input      map[string]any `json:"input,omitempty"`
-	Output     *ccToolOutput `json:"output,omitempty"`
+	Output     *ccToolOutput  `json:"output,omitempty"`
 }
 
 type ccMessage struct {
@@ -308,8 +308,8 @@ type generateEvent struct {
 	// finish
 	FinishReason string `json:"finishReason"`
 	TotalUsage   *struct {
-		InputTokens  *int64 `json:"inputTokens"`
-		OutputTokens *int64 `json:"outputTokens"`
+		InputTokens       *int64 `json:"inputTokens"`
+		OutputTokens      *int64 `json:"outputTokens"`
 		InputTokenDetails *struct {
 			CacheReadTokens  *int64 `json:"cacheReadTokens"`
 			CacheWriteTokens *int64 `json:"cacheWriteTokens"`
@@ -317,8 +317,8 @@ type generateEvent struct {
 		} `json:"inputTokenDetails"`
 	} `json:"totalUsage"`
 	// error: error may be an object or a string
-	Error json.RawMessage `json:"error"`
-	Message string        `json:"message"`
+	Error   json.RawMessage `json:"error"`
+	Message string          `json:"message"`
 }
 
 func (e *generateEvent) errorMessage() string {

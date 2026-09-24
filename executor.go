@@ -24,7 +24,7 @@ func NewExecutor(cfg *pluginConfig) *Executor { return &Executor{cfg: cfg} }
 
 func (e *Executor) Identifier() string { return Provider }
 
-const missingKeyMsg = "commandcode-go executor: missing api key (set plugins.configs.commandcode-go.api_keys in config.yaml)"
+const missingKeyMsg = "commandcode-go executor: missing api key (upload a commandcode-go auth file)"
 
 func (e *Executor) endpoint() string {
 	return e.cfg.baseURL() + "/alpha/generate"
@@ -53,7 +53,7 @@ func (e *Executor) buildBody(model string, payload []byte) ([]byte, error) {
 // Execute performs a completion by draining the (always-streaming) generate
 // wire and assembling one chat.completion object.
 func (e *Executor) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-	key := strings.TrimSpace(e.cfg.firstKey())
+	key := e.requestKey(req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
 	if key == "" {
 		return pluginapi.ExecutorResponse{}, statusError{statusCode: http.StatusUnauthorized, msg: missingKeyMsg}
 	}
@@ -109,7 +109,7 @@ func (e *Executor) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (
 // MUST be bare JSON — the host adds "data: " framing; empty lines and stream
 // termination are the host's business.
 func (e *Executor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-	key := strings.TrimSpace(e.cfg.firstKey())
+	key := e.requestKey(req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
 	if key == "" {
 		return pluginapi.ExecutorStreamResponse{}, statusError{statusCode: http.StatusUnauthorized, msg: missingKeyMsg}
 	}
@@ -274,7 +274,7 @@ func (e *Executor) HttpRequest(ctx context.Context, req pluginapi.ExecutorHTTPRe
 		headers = http.Header{}
 	}
 	if headers.Get("Authorization") == "" {
-		key := strings.TrimSpace(e.cfg.firstKey())
+		key := e.requestKey(req.StorageJSON, req.Metadata, req.Attributes)
 		if key == "" {
 			return pluginapi.ExecutorHTTPResponse{}, statusError{statusCode: http.StatusUnauthorized, msg: missingKeyMsg}
 		}
@@ -407,4 +407,15 @@ func (r *streamReader) Read(p []byte) (int, error) {
 			r.off = 0
 		}
 	}
+}
+
+// requestKey preserves legacy config mode without bypassing managed-auth disable/delete.
+func (e *Executor) requestKey(raw []byte, metadata map[string]any, attributes map[string]string) string {
+	if key := credentialKey(raw, metadata, attributes); key != "" {
+		return key
+	}
+	if e.cfg.AuthFiles {
+		return ""
+	}
+	return strings.TrimSpace(e.cfg.firstKey())
 }

@@ -9,11 +9,12 @@ import (
 // pluginConfig mirrors the plugins.configs.<id> mapping the host hands us
 // as raw YAML at register/reconfigure time.
 //
-// On the ModelRouter path the host passes a nil auth, so the API key MUST
-// come from plugin config, not host auth selection.
+// Legacy self-routed mode reads plugin config. Managed mode delegates credential
+// selection to the host so disabling or deleting an auth takes effect.
 type pluginConfig struct {
-	Enabled  bool `yaml:"enabled"`
-	Priority int  `yaml:"priority"`
+	AuthFiles bool `yaml:"auth_files"`
+	Enabled   bool `yaml:"enabled"`
+	Priority  int  `yaml:"priority"`
 
 	// APIKeys: first entry is used. A list keeps room for operators to swap
 	// keys without restructuring; no pooling is implemented (one Go plan

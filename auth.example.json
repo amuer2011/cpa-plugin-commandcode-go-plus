@@ -1,0 +1,7 @@
+{
+  "type": "commandcode-go",
+  "api_key": "user_REPLACE_WITH_YOUR_COMMAND_CODE_KEY",
+  "email": "your-account@example.com",
+  "label": "CommandCode Go",
+  "disabled": false
+}

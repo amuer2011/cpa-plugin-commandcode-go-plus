@@ -38,6 +38,9 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 	if !r.owned(req) {
 		return pluginapi.ModelRouteResponse{}, nil
 	}
+	if r.cfg.AuthFiles {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetProvider, Target: Provider, TargetModel: Provider + "/" + normalizeModel(routeModel(req)), Reason: "CommandCode Go managed credential"}, nil
+	}
 	return pluginapi.ModelRouteResponse{
 		Handled:    true,
 		TargetKind: pluginapi.ModelRouteTargetSelf,
@@ -93,4 +96,12 @@ func modelFromBody(body []byte) string {
 		b.WriteByte(c)
 	}
 	return ""
+}
+
+// routeModel uses the payload only when the host did not supply a model name.
+func routeModel(req pluginapi.ModelRouteRequest) string {
+	if strings.TrimSpace(req.RequestedModel) != "" {
+		return req.RequestedModel
+	}
+	return modelFromBody(req.Body)
 }

@@ -1,8 +1,8 @@
 // CommandCode Go provider plugin ABI entrypoint (c-shared).
 //
 // Mirrors cmd/commandcode/abi.go from cpa-plugin-commandcode, trimmed to the
-// capabilities this plugin declares: model_provider, model_router, executor.
-// SchemaVersion tracks the host contract (v7.2.147 => 4).
+// capabilities declared by this plugin, including auth and quota providers.
+// SchemaVersion follows the pinned host SDK contract.
 package main
 
 /*
@@ -65,8 +65,8 @@ import (
 )
 
 // pluginVersion is overridden at build time:
-// go build -ldflags "-X main.pluginVersion=1.0.0"
-var pluginVersion = "1.0.0"
+// go build -ldflags "-X main.pluginVersion=1.1.0"
+var pluginVersion = "1.1.0"
 
 var abiState = struct {
 	sync.RWMutex
@@ -85,6 +85,8 @@ type abiRegistration struct {
 }
 
 type abiCapabilities struct {
+	AuthProvider          bool                         `json:"auth_provider"`
+	QuotaProvider         bool                         `json:"quota_provider"`
 	ModelProvider         bool                         `json:"model_provider"`
 	ModelRouter           bool                         `json:"model_router"`
 	Executor              bool                         `json:"executor"`
@@ -218,8 +220,62 @@ func handleABIMethod(ctx context.Context, method string, request []byte) ([]byte
 		return nil, errPlugin
 	}
 	switch method {
-	case pluginabi.MethodExecutorIdentifier:
+	case pluginabi.MethodExecutorIdentifier, pluginabi.MethodAuthIdentifier, pluginabi.MethodQuotaIdentifier:
 		return abiOKEnvelope(abiIdentifierResponse{Identifier: p.Identifier()})
+	case pluginabi.MethodAuthParse:
+		var req pluginapi.AuthParseRequest
+		if err := json.Unmarshal(request, &req); err != nil {
+			return nil, err
+		}
+		resp, err := p.ParseAuth(ctx, req)
+		return abiOKEnvelopeWithError(resp, err)
+	case pluginabi.MethodAuthLoginStart:
+		var req pluginapi.AuthLoginStartRequest
+		if err := json.Unmarshal(request, &req); err != nil {
+			return nil, err
+		}
+		resp, err := p.StartLogin(ctx, req)
+		return abiOKEnvelopeWithError(resp, err)
+	case pluginabi.MethodAuthLoginPoll:
+		req, err := decodeAuthLoginPollRequest(request)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := p.PollLogin(ctx, req)
+		return abiOKEnvelopeWithError(resp, err)
+	case pluginabi.MethodAuthRefresh:
+		var req pluginapi.AuthRefreshRequest
+		if err := json.Unmarshal(request, &req); err != nil {
+			return nil, err
+		}
+		resp, err := p.RefreshAuth(ctx, req)
+		return abiOKEnvelopeWithError(resp, err)
+	case pluginabi.MethodQuotaDescribe:
+		var req pluginapi.QuotaDescribeRequest
+		if err := json.Unmarshal(request, &req); err != nil {
+			return nil, err
+		}
+		resp, err := p.DescribeQuota(ctx, req)
+		return abiOKEnvelopeWithError(resp, err)
+	case pluginabi.MethodQuotaReset:
+		var req pluginapi.QuotaResetRequest
+		if err := json.Unmarshal(request, &req); err != nil {
+			return nil, err
+		}
+		resp, err := p.ResetQuota(ctx, req)
+		return abiOKEnvelopeWithError(resp, err)
+	case pluginabi.MethodQuotaFetch:
+		var rpcReq struct {
+			pluginapi.QuotaFetchRequest
+			HostCallbackID string `json:"host_callback_id,omitempty"`
+		}
+		if err := json.Unmarshal(request, &rpcReq); err != nil {
+			return nil, err
+		}
+		req := rpcReq.QuotaFetchRequest
+		req.HTTPClient = abiHostHTTPClient{callbackID: rpcReq.HostCallbackID}
+		resp, err := p.FetchQuota(ctx, req)
+		return abiOKEnvelopeWithError(resp, err)
 	case pluginabi.MethodModelStatic:
 		var req pluginapi.StaticModelRequest
 		if errDecode := json.Unmarshal(request, &req); errDecode != nil {
@@ -306,6 +362,8 @@ func handleRegister(request []byte) ([]byte, error) {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata:      built.Metadata,
 		Capabilities: abiCapabilities{
+			AuthProvider:          built.Capabilities.AuthProvider != nil,
+			QuotaProvider:         built.Capabilities.QuotaProvider != nil,
 			ModelProvider:         built.Capabilities.ModelProvider != nil,
 			ModelRouter:           built.Capabilities.ModelRouter != nil,
 			Executor:              built.Capabilities.Executor != nil,
@@ -323,6 +381,23 @@ func currentPlugin() (*plug.CommandCodeGoPlugin, error) {
 		return nil, fmt.Errorf("commandcode-go plugin is not registered")
 	}
 	return abiState.plugin, nil
+}
+
+// The host HTTP client is process-local and omitted from JSON. Restore it from
+// the host callback ID for auth polling before the plugin validates a new key.
+func decodeAuthLoginPollRequest(data []byte) (pluginapi.AuthLoginPollRequest, error) {
+	var rpcReq struct {
+		pluginapi.AuthLoginPollRequest
+		HostCallbackID string `json:"host_callback_id,omitempty"`
+	}
+	if err := json.Unmarshal(data, &rpcReq); err != nil {
+		return pluginapi.AuthLoginPollRequest{}, err
+	}
+	req := rpcReq.AuthLoginPollRequest
+	if rpcReq.HostCallbackID != "" {
+		req.HTTPClient = abiHostHTTPClient{callbackID: rpcReq.HostCallbackID}
+	}
+	return req, nil
 }
 
 type abiHostHTTPClient struct {

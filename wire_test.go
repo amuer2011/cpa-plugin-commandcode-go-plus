@@ -23,12 +23,12 @@ func TestBuildGenerateBody_SystemAndUser(t *testing.T) {
 	}
 	var body struct {
 		Params struct {
-			Model        string  `json:"model"`
-			System       string  `json:"system"`
-			MaxTokens    int64   `json:"max_tokens"`
-			Temperature  float64 `json:"temperature"`
-			Stream       bool    `json:"stream"`
-			Messages     []struct {
+			Model       string  `json:"model"`
+			System      string  `json:"system"`
+			MaxTokens   int64   `json:"max_tokens"`
+			Temperature float64 `json:"temperature"`
+			Stream      bool    `json:"stream"`
+			Messages    []struct {
 				Role    string `json:"role"`
 				Content []struct {
 					Type string `json:"type"`
@@ -202,8 +202,8 @@ func TestCompletionAssembler_RendersOpenAI(t *testing.T) {
 	a.apply(&generateEvent{Type: "tool-call", ToolCallID: "t1", ToolName: "shell", Input: map[string]any{"cmd": "ls"}})
 	in, out := int64(11), int64(7)
 	a.apply(&generateEvent{Type: "finish", FinishReason: "tool-calls", TotalUsage: &struct {
-		InputTokens  *int64 `json:"inputTokens"`
-		OutputTokens *int64 `json:"outputTokens"`
+		InputTokens       *int64 `json:"inputTokens"`
+		OutputTokens      *int64 `json:"outputTokens"`
 		InputTokenDetails *struct {
 			CacheReadTokens  *int64 `json:"cacheReadTokens"`
 			CacheWriteTokens *int64 `json:"cacheWriteTokens"`
@@ -258,10 +258,10 @@ func TestCompletionAssembler_RendersOpenAI(t *testing.T) {
 
 func TestNormalizeModel(t *testing.T) {
 	cases := map[string]string{
-		"commandcode-go/deepseek-v4.1-flash":  "deepseek-v4.1-flash",
-		"deepseek/deepseek-v4.1-flash":        "deepseek-v4.1-flash",
-		"DeepSeek-V4.1-Flash":                 "deepseek-v4.1-flash",
-		"glm-5.3-flash(high)":                 "glm-5.3-flash",
+		"commandcode-go/deepseek-v4.1-flash": "deepseek-v4.1-flash",
+		"deepseek/deepseek-v4.1-flash":       "deepseek-v4.1-flash",
+		"DeepSeek-V4.1-Flash":                "deepseek-v4.1-flash",
+		"glm-5.3-flash(high)":                "glm-5.3-flash",
 	}
 	for in, want := range cases {
 		if got := normalizeModel(in); got != want {
