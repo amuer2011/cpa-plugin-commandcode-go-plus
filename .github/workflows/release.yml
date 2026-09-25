@@ -135,7 +135,7 @@ jobs:
           test -s "$arm64"
           test -s "$amd64"
           sha256sum "$amd64" "$arm64" > SHA256SUMS
-          flags=(--verify-tag --generate-notes --title "CommandCode Go ${version}")
+          flags=(--generate-notes --title "CommandCode Go ${version}")
           if [[ "$version" == *-* ]]; then
             flags+=(--prerelease)
           fi
@@ -152,5 +152,5 @@ jobs:
             gh release upload --clobber "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS
           else
             gh release create "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS \
-              --notes-file RELEASE_NOTES.md "${flags[@]}"
+              --target "$GITHUB_SHA" --notes-file RELEASE_NOTES.md "${flags[@]}"
           fi
