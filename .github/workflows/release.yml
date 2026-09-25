@@ -135,7 +135,7 @@ jobs:
           test -s "$arm64"
           test -s "$amd64"
           sha256sum "$amd64" "$arm64" > SHA256SUMS
-          flags=(--generate-notes --title "CommandCode Go ${version}")
+          flags=(--generate-notes --title "$RELEASE_TAG")
           if [[ "$version" == *-* ]]; then
             flags+=(--prerelease)
           fi
@@ -150,6 +150,7 @@ jobs:
           # this workflow. Add generated assets to those releases as well.
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload --clobber "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG"
           else
             gh release create "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS \
               --target "$GITHUB_SHA" --notes-file RELEASE_NOTES.md "${flags[@]}"
