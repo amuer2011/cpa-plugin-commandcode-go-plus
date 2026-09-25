@@ -6,6 +6,11 @@ on:
     tags: ['v[0-9]*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional existing/new version tag to publish, e.g. v1.0.0; leave empty for build-only"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -36,14 +41,22 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.release_tag || github.sha }}
           persist-credentials: false
 
       - name: Resolve version
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [[ "$REF_TYPE" == tag ]]; then
+          if [[ -n "$REQUESTED_RELEASE_TAG" ]]; then
+            if [[ ! "$REQUESTED_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+              echo "Invalid release tag: $REQUESTED_RELEASE_TAG" >&2
+              exit 1
+            fi
+            version="${REQUESTED_RELEASE_TAG#v}"
+          elif [[ "$REF_TYPE" == tag ]]; then
             version="${REF_NAME#v}"
           else
             version="$(cat VERSION)"
@@ -89,7 +102,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -107,7 +122,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -129,6 +144,11 @@ jobs:
             "当前 CPA 根据文件名识别插件 ID：安装时请将选中的文件改名为 commandcode-go-v${version}.so。" \
             '不要将两个架构同时放入插件目录，也不要保留带架构的下载文件名。旧版本请移至插件目录之外备份。' \
             > RELEASE_NOTES.md
-          # Never silently overwrite assets of an already published version.
-          gh release create "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS \
-            --notes-file RELEASE_NOTES.md "${flags[@]}"
+          # Manual GitHub Releases already exist when their tag push starts
+          # this workflow. Add generated assets to those releases as well.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload --clobber "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS
+          else
+            gh release create "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS \
+              --notes-file RELEASE_NOTES.md "${flags[@]}"
+          fi
