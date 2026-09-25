@@ -41,7 +41,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_tag || github.sha }}
+          # Build the revision selected when the workflow was triggered.
+          # release_tag controls the release/assets version, not the source ref.
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Resolve version
