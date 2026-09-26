@@ -23,9 +23,10 @@ type usageWindow struct {
 }
 type creditsResponse struct {
 	Credits *struct {
-		Monthly   float64 `json:"monthlyCredits"`
-		Purchased float64 `json:"purchasedCredits"`
-		Free      float64 `json:"freeCredits"`
+		Monthly        float64 `json:"monthlyCredits"`
+		MonthlyGranted float64 `json:"monthlyCreditsGranted"`
+		Purchased      float64 `json:"purchasedCredits"`
+		Free           float64 `json:"freeCredits"`
 	} `json:"credits"`
 	Windows struct {
 		FiveHour *usageWindow `json:"fiveHour"`
@@ -69,8 +70,23 @@ func (p *CommandCodeGoPlugin) FetchQuota(ctx context.Context, req pluginapi.Quot
 		suffix = "?orgId=" + url.QueryEscape(identity.Org.ID)
 	}
 	var credits creditsResponse
-	if err := fetch("/alpha/billing/credits"+suffix, &credits); err != nil {
-		return out, err
+	internalErr := fetch("/internal/billing/credits"+suffix, &credits)
+	if internalErr != nil || credits.Credits == nil || credits.Credits.MonthlyGranted <= 0 {
+		// The usage-page endpoint exposes monthlyCreditsGranted. Some API-key
+		// credentials may not be allowed to call it, so retain the established
+		// CLI billing endpoint as a compatibility fallback.
+		var alphaCredits creditsResponse
+		alphaErr := fetch("/alpha/billing/credits"+suffix, &alphaCredits)
+		if alphaErr == nil && alphaCredits.Credits != nil {
+			if credits.Credits == nil || alphaCredits.Credits.MonthlyGranted > credits.Credits.MonthlyGranted {
+				credits = alphaCredits
+			}
+		} else if credits.Credits == nil {
+			if alphaErr != nil {
+				return out, alphaErr
+			}
+			return out, fmt.Errorf("commandcode-go: upstream did not return credit data")
+		}
 	}
 	if credits.Credits == nil {
 		return out, fmt.Errorf("commandcode-go: upstream did not return credit data")
@@ -85,15 +101,26 @@ func (p *CommandCodeGoPlugin) FetchQuota(ctx context.Context, req pluginapi.Quot
 	if err := fetch("/alpha/billing/subscriptions"+suffix, &subscription); err != nil {
 		return out, err
 	}
+	monthlyReset := ""
 	if subscription.Data != nil {
 		out.Subscription = &pluginapi.QuotaSubscription{Plan: subscription.Data.Plan, TierName: subscription.Data.Status}
-		reset := ""
 		if subscription.Data.CurrentPeriodEnd != "" {
 			if parsed, err := time.Parse(time.RFC3339, subscription.Data.CurrentPeriodEnd); err == nil {
-				reset = parsed.UTC().Format(time.RFC3339)
+				monthlyReset = parsed.UTC().Format(time.RFC3339)
 			}
 		}
-		out.Groups = append(out.Groups, pluginapi.QuotaGroup{DisplayName: "monthly", Buckets: []pluginapi.QuotaBucket{{Window: "monthly", RemainingFraction: 1, ResetTime: reset}}})
+	}
+	// monthlyCredits is the remaining balance; monthlyCreditsGranted is the
+	// allowance. Derive utilization from those two values rather than treating
+	// every subscribed account as having 100% remaining.
+	if credits.Credits.MonthlyGranted > 0 {
+		granted := credits.Credits.MonthlyGranted
+		remaining := math.Max(0, math.Min(granted, credits.Credits.Monthly))
+		used := granted - remaining
+		out.Groups = append(out.Groups, pluginapi.QuotaGroup{DisplayName: "monthly", Buckets: []pluginapi.QuotaBucket{{
+			Window: "monthly", RemainingFraction: remaining / granted, ResetTime: monthlyReset,
+			Description: fmt.Sprintf("%.6g / %.6g credits used", used, granted),
+		}}})
 	}
 	// Credits are provider credits, not a fabricated USD balance or inferred monthly cap.
 	for _, metric := range []struct {
