@@ -179,7 +179,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequ
 				// include_usage shape), then the completion is over: stop
 				// reading so trailing keepalives cannot extend the stream.
 				if ev.TotalUsage != nil {
-					if frame, err := builder.usageChunk(ev.TotalUsage.InputTokens, ev.TotalUsage.OutputTokens); err == nil {
+					if frame, err := builder.usageChunk(ev.TotalUsage); err == nil {
 						emit(frame)
 					}
 				}

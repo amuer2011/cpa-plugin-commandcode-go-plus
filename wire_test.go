@@ -279,3 +279,48 @@ func TestConfigDefaults(t *testing.T) {
 		t.Errorf("upstreamName(kimi) = %q", got)
 	}
 }
+
+func TestCacheUsageRoundTrip(t *testing.T) {
+	cases := []struct{ name, usage, want string }{
+		{"cache", `{"inputTokens":127758,"outputTokens":630,"inputTokenDetails":{"cacheReadTokens":120000,"cacheWriteTokens":4000,"noCacheTokens":3758}}`, `{"prompt_tokens":127758,"completion_tokens":630,"total_tokens":128388,"prompt_tokens_details":{"cached_tokens":120000},"cache_read_input_tokens":120000,"cache_creation_input_tokens":4000,"prompt_cache_miss_tokens":3758}`},
+		{"zero", `{"inputTokens":10,"inputTokenDetails":{"cacheReadTokens":0,"cacheWriteTokens":0}}`, `{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":0},"cache_read_input_tokens":0,"cache_creation_input_tokens":0}`},
+		{"write-only", `{"inputTokens":10,"inputTokenDetails":{"cacheWriteTokens":8}}`, `{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10,"cache_creation_input_tokens":8}`},
+		{"no-details", `{"inputTokens":11,"outputTokens":7}`, `{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}`},
+		{"missing", `null`, `{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev, ok := decodeEvent([]byte(`{"type":"finish","totalUsage":` + tc.usage + `}`))
+			if !ok {
+				t.Fatal("finish decode failed")
+			}
+			stream, err := newChunkBuilder("m").usageChunk(ev.TotalUsage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := newCompletionAssembler("m")
+			a.apply(ev)
+			assembled, err := a.render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want map[string]any
+			if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			for _, raw := range [][]byte{stream, assembled} {
+				var response struct {
+					Usage map[string]any `json:"usage"`
+				}
+				if err := json.Unmarshal(raw, &response); err != nil {
+					t.Fatal(err)
+				}
+				gotJSON, _ := json.Marshal(response.Usage)
+				wantJSON, _ := json.Marshal(want)
+				if string(gotJSON) != string(wantJSON) {
+					t.Errorf("usage = %s, want %s", gotJSON, wantJSON)
+				}
+			}
+		})
+	}
+}

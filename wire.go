@@ -306,19 +306,51 @@ type generateEvent struct {
 	Args       map[string]any `json:"args"`
 	Arguments  map[string]any `json:"arguments"`
 	// finish
-	FinishReason string `json:"finishReason"`
-	TotalUsage   *struct {
-		InputTokens       *int64 `json:"inputTokens"`
-		OutputTokens      *int64 `json:"outputTokens"`
-		InputTokenDetails *struct {
-			CacheReadTokens  *int64 `json:"cacheReadTokens"`
-			CacheWriteTokens *int64 `json:"cacheWriteTokens"`
-			NoCacheTokens    *int64 `json:"noCacheTokens"`
-		} `json:"inputTokenDetails"`
-	} `json:"totalUsage"`
+	FinishReason string         `json:"finishReason"`
+	TotalUsage   *generateUsage `json:"totalUsage"`
 	// error: error may be an object or a string
 	Error   json.RawMessage `json:"error"`
 	Message string          `json:"message"`
+}
+
+// generateUsage retains all upstream token accounting.
+type generateUsage = struct {
+	InputTokens       *int64 `json:"inputTokens"`
+	OutputTokens      *int64 `json:"outputTokens"`
+	InputTokenDetails *struct {
+		CacheReadTokens  *int64 `json:"cacheReadTokens"`
+		CacheWriteTokens *int64 `json:"cacheWriteTokens"`
+		NoCacheTokens    *int64 `json:"noCacheTokens"`
+	} `json:"inputTokenDetails"`
+}
+
+// openaiUsage preserves cache reads separately from cache creation.
+func openaiUsage(usage *generateUsage) map[string]any {
+	prompt, completion := int64(0), int64(0)
+	if usage != nil {
+		if usage.InputTokens != nil {
+			prompt = *usage.InputTokens
+		}
+		if usage.OutputTokens != nil {
+			completion = *usage.OutputTokens
+		}
+	}
+	result := map[string]any{"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
+	if usage != nil && usage.InputTokenDetails != nil {
+		details := usage.InputTokenDetails
+		if details.CacheReadTokens != nil {
+			result["prompt_tokens_details"] = map[string]any{"cached_tokens": *details.CacheReadTokens}
+			result["cache_read_input_tokens"] = *details.CacheReadTokens
+		}
+		// Cache creation has no standard Chat Completions field.
+		if details.CacheWriteTokens != nil {
+			result["cache_creation_input_tokens"] = *details.CacheWriteTokens
+		}
+		if details.NoCacheTokens != nil {
+			result["prompt_cache_miss_tokens"] = *details.NoCacheTokens
+		}
+	}
+	return result
 }
 
 func (e *generateEvent) errorMessage() string {
@@ -418,26 +450,14 @@ func (c *chunkBuilder) finishChunk(reason string) ([]byte, error) {
 
 // usageChunk carries token counts on a trailing empty-choices chunk (the
 // OpenAI stream_options.include_usage shape the host reads).
-func (c *chunkBuilder) usageChunk(in, out *int64) ([]byte, error) {
-	prompt := int64(0)
-	completion := int64(0)
-	if in != nil {
-		prompt = *in
-	}
-	if out != nil {
-		completion = *out
-	}
+func (c *chunkBuilder) usageChunk(usage *generateUsage) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"id":      c.id,
 		"object":  "chat.completion.chunk",
 		"created": c.created,
 		"model":   c.model,
 		"choices": []any{},
-		"usage": map[string]any{
-			"prompt_tokens":     prompt,
-			"completion_tokens": completion,
-			"total_tokens":      prompt + completion,
-		},
+		"usage":   openaiUsage(usage),
 	})
 }
 
@@ -451,8 +471,7 @@ type completionAssembler struct {
 	reasoning strings.Builder
 	toolCalls []map[string]any
 	finish    string
-	usageIn   *int64
-	usageOut  *int64
+	usage     *generateUsage
 }
 
 func newCompletionAssembler(model string) *completionAssembler {
@@ -481,8 +500,7 @@ func (a *completionAssembler) apply(ev *generateEvent) {
 	case "finish":
 		a.finish = mapFinishReason(ev.FinishReason)
 		if ev.TotalUsage != nil {
-			a.usageIn = ev.TotalUsage.InputTokens
-			a.usageOut = ev.TotalUsage.OutputTokens
+			a.usage = ev.TotalUsage
 		}
 	}
 }
@@ -499,13 +517,6 @@ func (a *completionAssembler) render() ([]byte, error) {
 	if len(a.toolCalls) > 0 {
 		message["tool_calls"] = a.toolCalls
 	}
-	prompt, completion := int64(0), int64(0)
-	if a.usageIn != nil {
-		prompt = *a.usageIn
-	}
-	if a.usageOut != nil {
-		completion = *a.usageOut
-	}
 	return json.Marshal(map[string]any{
 		"id":      a.id,
 		"object":  "chat.completion",
@@ -514,10 +525,6 @@ func (a *completionAssembler) render() ([]byte, error) {
 		"choices": []map[string]any{
 			{"index": 0, "message": message, "finish_reason": finish},
 		},
-		"usage": map[string]any{
-			"prompt_tokens":     prompt,
-			"completion_tokens": completion,
-			"total_tokens":      prompt + completion,
-		},
+		"usage": openaiUsage(a.usage),
 	})
 }
