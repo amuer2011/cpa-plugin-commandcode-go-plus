@@ -20,11 +20,16 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 PROVIDER = "commandcode-go"
 LOCAL_ORIGIN = "http://127.0.0.1:8765"
 MAX_BODY = 65536
+SESSION_TTL = 30 * 60  # Match CPA's pending OAuth session lifetime.
 # The management site may reject Python's default User-Agent at its edge proxy.
 BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
 
 class BridgeError(Exception):
+    pass
+
+
+class NeedsConnection(BridgeError):
     pass
 
 
@@ -93,6 +98,8 @@ class Session:
         self.expires = 0
         self.submitted = False
         self.complete = False
+        self.pending = None
+        self.pending_expires = 0
 
     def start(self, address, key):
         if not key.strip():
@@ -112,23 +119,43 @@ class Session:
                     or query.get("mode") != ["redirect"]):
                 raise BridgeError("插件返回了不兼容的授权地址，请确认插件版本。")
             self.client, self.state = client, state
-            self.expires = time.monotonic() + 600
+            self.expires = time.monotonic() + SESSION_TTL
             self.submitted = False
             self.complete = False
+            self.pending = None
             return login
 
     def check(self, state):
         if time.monotonic() >= self.expires:
             self.client = None
-        if (not self.client or not state or not hmac.compare_digest(self.state, state)
-                or time.monotonic() >= self.expires):
-            raise BridgeError("授权会话不存在或已过期，请从助手首页重新登录。")
+        if not self.client:
+            raise NeedsConnection("助手尚未连接 CPA，或连接已过期。请输入管理密钥继续保存本次授权。")
+        if not isinstance(state, str) or not state or len(state) > 128:
+            raise BridgeError("CommandCode 未返回有效的授权 state，请重新发起授权。")
+
+    def resume(self, address, key):
+        with self.lock:
+            if not self.pending or time.monotonic() >= self.pending_expires:
+                self.pending = None
+                raise BridgeError("本机保留的授权已过期，请重新发起授权。")
+            if not key.strip():
+                raise BridgeError("请输入 CPA 管理密钥。")
+            self.client = CPA(address, key.strip())
+            self.expires = time.monotonic() + SESSION_TTL
+            self.submit(self.pending)
+
+    def has_pending(self):
+        with self.lock:
+            if time.monotonic() >= self.pending_expires:
+                self.pending = None
+            return self.pending is not None
 
     def submit(self, payload):
         with self.lock:
             state = payload.get("state", "")
-            self.check(state)
-            if self.submitted:
+            if not isinstance(state, str) or not state or len(state) > 128:
+                raise BridgeError("CommandCode 未返回有效的授权 state，请重新发起授权。")
+            if self.submitted and hmac.compare_digest(self.state, state):
                 raise BridgeError("该授权回调已提交。")
             body = {"provider": PROVIDER, "state": state}
             if payload.get("error"):
@@ -140,8 +167,31 @@ class Session:
                 credentials = {k: payload[k] for k in
                                ("apiKey", "userId", "userName", "keyName", "email") if k in payload}
                 body["code"] = json.dumps(credentials)
+            try:
+                self.check(state)
+            except NeedsConnection:
+                # A login started in CPA, or before the helper restarted, can
+                # still be resumed. Keep its callback in memory until the user
+                # supplies management credentials; never reflect it into HTML.
+                self.pending = dict(payload)
+                self.pending_expires = time.monotonic() + 600
+                raise
+            # CPA owns the OAuth state registry. Validate there rather than
+            # requiring every login to have been started in this helper.
+            result = self.client.call("/get-auth-status?" + urlencode({"state": state}))
+            if result.get("status") == "ok":
+                self.state = state
+                self.submitted = self.complete = True
+                self.pending = self.client = None
+                return
+            if result.get("status") != "wait":
+                self.pending = None
+                raise BridgeError("CPA 中的本次授权已失效或已经完成，请重新发起授权。")
             self.client.call("/oauth-callback", body)
+            self.state = state
             self.submitted = True
+            self.complete = False
+            self.pending = None
 
     def status(self):
         with self.lock:
@@ -182,16 +232,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(page)
 
+    def connection_page(self, message=""):
+        pending = self.server.session.has_pending()
+        title = "继续保存账号" if pending else "CommandCode 登录"
+        action = "/resume" if pending else "/start"
+        intro = ("授权凭据已在本机收到。连接 CPA 后会继续保存，无需再次授权。"
+                 if pending else "输入 CPA 管理地址与管理密钥，继续完成 CommandCode 授权。账号会自动保存到 CPA。")
+        self.page(title, '<p>' + html.escape(message or intro) + '</p>'
+                  '<p>密钥仅在本机内存中使用，不写入文件或日志。完成后可关闭助手。</p>'
+                  '<form method="post" action="' + action + '">'
+                  '<input type="hidden" name="csrf" value="' + self.server.session.csrf + '">'
+                  '<label>CPA 管理地址<input name="address" type="url" required value="'
+                  + html.escape(self.server.cpa_url, quote=True) + '"></label>'
+                  '<label>CPA 管理密钥<input name="key" type="password" autocomplete="off" required></label>'
+                  '<button>' + ("连接 CPA 并保存账号" if pending else "开始授权") + '</button></form>')
+
     def do_GET(self):
         if self.path == "/":
-            self.page("CommandCode 登录", '<p>输入 CPA 管理地址与管理密钥，继续完成 CommandCode 授权。账号会自动保存到 CPA。</p>'
-                      '<p>密钥仅在本机内存中使用，不写入文件或日志。完成后可关闭助手。</p>'
-                      '<form method="post" action="/start">'
-                      '<input type="hidden" name="csrf" value="' + self.server.session.csrf + '">'
-                      '<label>CPA 管理地址<input name="address" type="url" required value="'
-                      + html.escape(self.server.cpa_url, quote=True) + '"></label>'
-                      '<label>CPA 管理密钥<input name="key" type="password" autocomplete="off" required></label>'
-                      '<button>开始授权</button></form>')
+            self.connection_page()
         elif self.path == "/status":
             try:
                 status = self.server.session.status()
@@ -207,13 +265,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.connection.settimeout(30)
         try:
-            if self.path not in ("/start", "/callback"):
+            if self.path not in ("/start", "/resume", "/callback"):
                 raise BridgeError("无效的回调路径。")
             # Browsers can send an opaque or absent Origin on navigational
             # form POSTs. The per-page CSRF token and pending OAuth state below
             # remain mandatory even when Origin cannot identify the sender.
             allowed_origins = ({LOCAL_ORIGIN, "http://localhost:8765"}
-                               if self.path == "/start" else {"https://commandcode.ai"})
+                               if self.path in ("/start", "/resume") else {"https://commandcode.ai"})
             if self.headers.get("Origin") not in allowed_origins | {None, "null"}:
                 self.page("请求被拒绝", '<p>请求来源不匹配。</p>', 403)
                 return
@@ -233,17 +291,23 @@ class Handler(BaseHTTPRequestHandler):
                     raise BridgeError("回调数据格式不正确。")
             else:
                 raise BridgeError("不支持的回调数据格式。")
-            if self.path == "/start":
+            if self.path in ("/start", "/resume"):
                 if not hmac.compare_digest(payload.get("csrf", ""), self.server.session.csrf):
                     raise BridgeError("登录页面已过期，请重新打开首页。")
+            if self.path == "/start":
                 login = self.server.session.start(payload.get("address", ""), payload.get("key", ""))
                 self.send_response(303)
                 self.send_header("Location", login)
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
+            elif self.path == "/resume":
+                self.server.session.resume(payload.get("address", ""), payload.get("key", ""))
+                self.page("正在保存账号", '<p>授权已提交，正在等待 CPA 验证并保存账号。</p>', refresh=True)
             else:
                 self.server.session.submit(payload)
                 self.page("正在保存账号", '<p>授权已接收，正在等待 CPA 验证并保存账号。</p>', refresh=True)
+        except NeedsConnection as error:
+            self.connection_page(str(error))
         except (BridgeError, ValueError, UnicodeError) as error:
             message = str(error) if isinstance(error, BridgeError) else "回调数据格式不正确。"
             self.page("登录未完成", '<p>' + html.escape(message) + '</p><a href="/">重新登录</a>', 400)

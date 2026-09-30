@@ -47,6 +47,8 @@ python commandcode-oauth-bridge.py --cpa-url https://你的CPA域名
 
 然后打开 `http://127.0.0.1:8765`，在助手页面开始授权。助手只监听 `127.0.0.1:8765`，校验回调来源和当前会话的 state，并通过带管理认证的 `/v0/management/oauth-callback` 提交凭据。管理密钥与 API key 不写入文件、页面或日志，也无需粘贴到聊天中。若 nginx 配置了白名单，浏览器所在电脑必须能够访问 CPA 管理接口。助手不会改变管理接口的认证或白名单。
 
+也可在助手运行期间从 CPA 管理页面发起授权。若助手尚未连接 CPA，回调页面会显示“继续保存账号”：输入管理地址与管理密钥即可保存本次授权，无需重新授权。回调只在本机内存中保留 10 分钟；最终由 CPA 确认 state 是否仍有效。助手连接期限与 CPA 的 30 分钟 OAuth 会话期限一致，已完成的会话会直接显示成功。
+
 ## English
 
 This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowing you to use models, manage OAuth accounts, and view quota through CPA.

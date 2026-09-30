@@ -7,7 +7,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, build_opener
 
 spec = importlib.util.spec_from_file_location("bridge", Path(__file__).with_name("commandcode-oauth-bridge.py"))
@@ -27,10 +27,15 @@ class FakeCPA(BaseHTTPRequestHandler):
             self.send_error(401)
             return
         if self.path.endswith("commandcode-go-auth-url"):
+            self.server.auth_starts += 1
             result = {"state": "test-state", "url": "https://commandcode.ai/studio/auth/cli?" + urlencode({
                 "callback": bridge.LOCAL_ORIGIN + "/callback", "state": "test-state", "mode": "redirect"})}
         else:
-            result = {"status": "ok" if self.server.callbacks else "wait"}
+            state = parse_qs(urlsplit(self.path).query).get("state", [""])[0]
+            if state not in self.server.states:
+                result = {"status": "error", "error": "unknown or expired state"}
+            else:
+                result = {"status": "ok" if any(c["state"] == state for c in self.server.callbacks) else "wait"}
         raw = json.dumps(result).encode()
         self.send_response(200)
         self.end_headers()
@@ -53,6 +58,8 @@ class CallbackTests(unittest.TestCase):
     def setUp(self):
         self.cpa = ThreadingHTTPServer(("127.0.0.1", 0), FakeCPA)
         self.cpa.callbacks = []
+        self.cpa.states = {"test-state", "cpa-page-state"}
+        self.cpa.auth_starts = 0
         self.local = ThreadingHTTPServer(("127.0.0.1", 0), bridge.Handler)
         self.local.session = bridge.Session()
         self.local.cpa_url = f"http://127.0.0.1:{self.cpa.server_port}"
@@ -115,9 +122,62 @@ class CallbackTests(unittest.TestCase):
     def test_expired_callback_releases_management_key(self):
         self.start()
         self.local.session.expires = time.monotonic() - 1
-        self.assertEqual(self.post("/callback", self.fields, "https://commandcode.ai")[0], 400)
+        status, _, body = self.post("/callback", self.fields, "https://commandcode.ai")
+        self.assertEqual(status, 200)
+        self.assertIn('action="/resume"', body)
         self.assertEqual(self.cpa.callbacks, [])
         self.assertIsNone(self.local.session.client)
+
+    def test_cpa_page_login_can_resume_without_local_session(self):
+        fields = {**self.fields, "state": "cpa-page-state"}
+        status, _, body = self.post("/callback", fields, "https://commandcode.ai")
+        self.assertEqual(status, 200)
+        self.assertIn('action="/resume"', body)
+        self.assertNotIn("test-api-key", body)
+        self.assertEqual(self.cpa.callbacks, [])
+        status, _, body = self.post("/resume", {"csrf": self.local.session.csrf,
+            "address": self.local.cpa_url, "key": "test-management-key"}, bridge.LOCAL_ORIGIN)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.cpa.auth_starts, 0)
+        self.assertEqual(self.cpa.callbacks[0]["state"], "cpa-page-state")
+        self.assertIsNone(self.local.session.pending)
+        self.assertEqual(self.local.session.status(), "ok")
+
+    def test_valid_other_pending_state_is_checked_by_cpa(self):
+        self.start()
+        status, _, body = self.post("/callback", {**self.fields, "state": "cpa-page-state"}, "https://commandcode.ai")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.cpa.callbacks[0]["state"], "cpa-page-state")
+        self.assertEqual(self.local.session.status(), "ok")
+
+    def test_completed_remote_session_is_success_without_duplicate_write(self):
+        self.start()
+        self.cpa.callbacks.append({"state": "test-state"})
+        status, _, body = self.post("/callback", self.fields, "https://commandcode.ai")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(self.cpa.callbacks), 1)
+        self.assertIsNone(self.local.session.client)
+        self.assertEqual(self.local.session.status(), "ok")
+
+    def test_resume_requires_csrf_and_rejects_expired_remote_state(self):
+        fields = {**self.fields, "state": "expired-state"}
+        self.post("/callback", fields, "https://commandcode.ai")
+        form = {"csrf": self.local.session.csrf, "address": self.local.cpa_url, "key": "test-management-key"}
+        self.assertEqual(self.post("/resume", {**form, "csrf": "wrong"}, bridge.LOCAL_ORIGIN)[0], 400)
+        status, _, body = self.post("/resume", form, bridge.LOCAL_ORIGIN)
+        self.assertEqual(status, 400)
+        self.assertIn("CPA 中的本次授权已失效", body)
+        self.assertEqual(self.cpa.callbacks, [])
+        self.assertIsNone(self.local.session.pending)
+
+    def test_pending_credentials_expire_without_being_exposed(self):
+        self.post("/callback", self.fields, "https://commandcode.ai")
+        self.local.session.pending_expires = time.monotonic() - 1
+        with self.opener.open(self.base + "/") as response:
+            body = response.read().decode()
+        self.assertNotIn("test-api-key", body)
+        self.assertIn('action="/start"', body)
+        self.assertIsNone(self.local.session.pending)
 
     def test_denial_and_duplicate_callbacks(self):
         self.start()
