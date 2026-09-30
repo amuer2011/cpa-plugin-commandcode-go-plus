@@ -69,6 +69,9 @@ jobs:
           fi
           echo "PLUGIN_VERSION=$version" >> "$GITHUB_ENV"
 
+      - name: Test browser-local OAuth callback bridge
+        run: python3 -B -m unittest discover -s scripts -p test_oauth_bridge.py -v
+
       - name: Test and build native plugin
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
@@ -92,12 +95,15 @@ jobs:
           python3 scripts/check-plugin.py \
             "dist/commandcode-go-v${PLUGIN_VERSION}+linux.debian12.glibc.${EXPECTED_ARCH}.so" \
             "$PLUGIN_VERSION" "$EXPECTED_ARCH"
+          cp scripts/commandcode-oauth-bridge.py dist/
 
       - name: Upload tested plugin
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: commandcode-go-${{ matrix.arch }}
-          path: dist/commandcode-go-v*+linux.debian12.glibc.${{ matrix.arch }}.so
+          path: |
+            dist/commandcode-go-v*+linux.debian12.glibc.${{ matrix.arch }}.so
+            dist/commandcode-oauth-bridge.py
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -134,7 +140,9 @@ jobs:
           amd64="commandcode-go-v${version}+linux.debian12.glibc.amd64.so"
           test -s "$arm64"
           test -s "$amd64"
-          sha256sum "$amd64" "$arm64" > SHA256SUMS
+          bridge="commandcode-oauth-bridge.py"
+          test -s "$bridge"
+          sha256sum "$amd64" "$arm64" "$bridge" > SHA256SUMS
           flags=(--generate-notes --title "$RELEASE_TAG")
           if [[ "$version" == *-* ]]; then
             flags+=(--prerelease)
@@ -146,13 +154,16 @@ jobs:
             '下载所选架构的 .so，直接放入 CPA 插件目录并重启，无需解压或重命名。' \
             '插件文件名在 -v 后使用构建元数据标注 Linux、Debian 12/glibc 和 CPU 架构；CPA 仍识别插件 ID 为 commandcode-go。' \
             '只安装与容器架构匹配的插件，旧版本请移至插件目录之外备份。' \
+            '' \
+            '远程 CPA 的 OAuth 登录还需在浏览器所在电脑运行 python commandcode-oauth-bridge.py。' \
+            '打开 http://127.0.0.1:8765，输入 CPA 管理地址和管理密钥后开始授权；助手自动接收回调并提交 CPA。' \
             > RELEASE_NOTES.md
           # Manual GitHub Releases already exist when their tag push starts
           # this workflow. Add generated assets to those releases as well.
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload --clobber "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS
+            gh release upload --clobber "$RELEASE_TAG" "$amd64" "$arm64" "$bridge" SHA256SUMS
             gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG"
           else
-            gh release create "$RELEASE_TAG" "$amd64" "$arm64" SHA256SUMS \
+            gh release create "$RELEASE_TAG" "$amd64" "$arm64" "$bridge" SHA256SUMS \
               --target "$GITHUB_SHA" --notes-file RELEASE_NOTES.md "${flags[@]}"
           fi
