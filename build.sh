@@ -43,4 +43,7 @@ go build -trimpath -buildvcs=false -buildmode=c-shared \
   -ldflags "-X main.pluginVersion=${PLUGIN_VERSION}" \
   -o "$ARTIFACT" ./cmd/commandcodego
 rm -f "${ARTIFACT%.so}.h"
+# The output directory may be owned by root when building in Docker. Stage
+# release assets here, with the same user that creates the native plugin.
+cp "${SRC_DIR}/scripts/commandcode-oauth-bridge.py" "$OUTPUT_DIR/"
 printf '[build] ok: %s\n' "$ARTIFACT"

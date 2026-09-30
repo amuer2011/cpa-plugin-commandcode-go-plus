@@ -95,7 +95,6 @@ jobs:
           python3 scripts/check-plugin.py \
             "dist/commandcode-go-v${PLUGIN_VERSION}+linux.debian12.glibc.${EXPECTED_ARCH}.so" \
             "$PLUGIN_VERSION" "$EXPECTED_ARCH"
-          cp scripts/commandcode-oauth-bridge.py dist/
 
       - name: Upload tested plugin
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
