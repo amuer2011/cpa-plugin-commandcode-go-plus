@@ -173,7 +173,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://commandcode.ai; frame-ancestors 'none'")
         self.end_headers()
@@ -206,8 +206,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path not in ("/start", "/callback"):
                 raise BridgeError("无效的回调路径。")
-            allowed_origin = LOCAL_ORIGIN if self.path == "/start" else "https://commandcode.ai"
-            if self.headers.get("Origin") != allowed_origin:
+            # Browsers can send an opaque or absent Origin on navigational
+            # form POSTs. The per-page CSRF token and pending OAuth state below
+            # remain mandatory even when Origin cannot identify the sender.
+            allowed_origins = ({LOCAL_ORIGIN, "http://localhost:8765"}
+                               if self.path == "/start" else {"https://commandcode.ai"})
+            if self.headers.get("Origin") not in allowed_origins | {None, "null"}:
                 self.page("请求被拒绝", '<p>请求来源不匹配。</p>', 403)
                 return
             size = int(self.headers.get("Content-Length", "0"))

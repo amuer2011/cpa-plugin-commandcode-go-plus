@@ -63,8 +63,10 @@ class CallbackTests(unittest.TestCase):
             server.server_close()
 
     def post(self, path, fields, origin):
-        request = Request(self.base + path, data=urlencode(fields).encode(), headers={
-            "Origin": origin, "Content-Type": "application/x-www-form-urlencoded"})
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if origin is not None:
+            headers["Origin"] = origin
+        request = Request(self.base + path, data=urlencode(fields).encode(), headers=headers)
         try:
             response = self.opener.open(request)
         except HTTPError as response_error:
@@ -124,6 +126,24 @@ class CallbackTests(unittest.TestCase):
         self.assertEqual(self.post("/start", {}, "https://commandcode.ai")[0], 403)
         self.assertEqual(self.post("/start", {"csrf": "wrong"}, bridge.LOCAL_ORIGIN)[0], 400)
         self.assertIsNone(self.local.session.client)
+
+    def test_navigation_with_opaque_origin_still_requires_session_tokens(self):
+        for origin in ("null", None, "http://localhost:8765"):
+            with self.subTest(origin=origin):
+                fields = {"csrf": self.local.session.csrf, "address": self.local.cpa_url,
+                          "key": "test-management-key"}
+                self.assertEqual(self.post("/start", {**fields, "csrf": "wrong"}, origin)[0], 400)
+                self.assertEqual(self.post("/start", fields, origin)[0], 303)
+        for origin in ("null", None):
+            with self.subTest(callback_origin=origin):
+                self.assertEqual(self.post("/callback", {**self.fields, "state": "wrong"}, origin)[0], 400)
+        self.assertEqual(self.cpa.callbacks, [])
+        self.assertEqual(self.post("/callback", self.fields, "null")[0], 200)
+        self.assertEqual(len(self.cpa.callbacks), 1)
+
+    def test_page_does_not_suppress_same_origin_form_origin(self):
+        with self.opener.open(self.base + "/") as response:
+            self.assertEqual(response.headers["Referrer-Policy"], "same-origin")
 
     def test_rejects_insecure_management_addresses(self):
         for address in ("http://example.com", "https://key@example.com", "https://example.com?a=1"):
