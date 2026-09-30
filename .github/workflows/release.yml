@@ -90,14 +90,14 @@ jobs:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
           python3 scripts/check-plugin.py \
-            "dist/commandcode-go-v${PLUGIN_VERSION}.so" \
+            "dist/commandcode-go-v${PLUGIN_VERSION}+linux.debian12.glibc.${EXPECTED_ARCH}.so" \
             "$PLUGIN_VERSION" "$EXPECTED_ARCH"
 
       - name: Upload tested plugin
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: commandcode-go-${{ matrix.arch }}
-          path: dist/commandcode-go-v*-linux-debian12-glibc-${{ matrix.arch }}.tar.gz
+          path: dist/commandcode-go-v*+linux.debian12.glibc.${{ matrix.arch }}.so
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -130,8 +130,8 @@ jobs:
           set -euo pipefail
           version="${RELEASE_TAG#v}"
           cd dist
-          arm64="commandcode-go-v${version}-linux-debian12-glibc-arm64.tar.gz"
-          amd64="commandcode-go-v${version}-linux-debian12-glibc-amd64.tar.gz"
+          arm64="commandcode-go-v${version}+linux.debian12.glibc.arm64.so"
+          amd64="commandcode-go-v${version}+linux.debian12.glibc.amd64.so"
           test -s "$arm64"
           test -s "$amd64"
           sha256sum "$amd64" "$arm64" > SHA256SUMS
@@ -143,8 +143,8 @@ jobs:
             'Linux amd64 / arm64，基于 Debian 12 / glibc 构建，不适用于 Alpine/musl。' \
             '' \
             '安装前请使用 SHA256SUMS 校验所选架构的文件。' \
-            "解压所选架构的 tar.gz，将包内 commandcode-go-v${version}.so 放入 CPA 插件目录并重启，无需重命名。" \
-            '发布包名包含 Linux、Debian 12/glibc 构建基线和 CPU 架构；包内插件名符合 CPA 的 ID/版本识别规则。' \
+            '下载所选架构的 .so，直接放入 CPA 插件目录并重启，无需解压或重命名。' \
+            '插件文件名在 -v 后使用构建元数据标注 Linux、Debian 12/glibc 和 CPU 架构；CPA 仍识别插件 ID 为 commandcode-go。' \
             '只安装与容器架构匹配的插件，旧版本请移至插件目录之外备份。' \
             > RELEASE_NOTES.md
           # Manual GitHub Releases already exist when their tag push starts

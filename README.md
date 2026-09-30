@@ -6,7 +6,7 @@
 
 **使用方法**
 1. 从 [GitHub Releases](https://github.com/amuer2011/cpa-plugin-commandcode-go-plus/releases) 下载与 CPA 容器架构匹配的插件（`amd64` 或 `arm64`）。
-2. 发布包格式为 `commandcode-go-v<版本>-linux-debian12-glibc-<架构>.tar.gz`，体现系统、Debian 12/glibc 构建基线与架构（不适用于 Alpine/musl）。解压后将包内 `commandcode-go-v<版本>.so` 放入 CPA 插件目录并重启 CPA，无需重命名。
+2. 插件文件格式为 `commandcode-go-v<版本>+linux.debian12.glibc.<架构>.so`，体现系统、Debian 12/glibc 构建基线与架构（不适用于 Alpine/musl）。直接放入 CPA 插件目录并重启 CPA，无需解压或重命名。系统与架构信息位于 `-v` 后，CPA 仍识别插件 ID 为 `commandcode-go`。
 3. 在 CPA 配置中启用插件：
 
    ```yaml
@@ -41,7 +41,7 @@ This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowin
 
 **Usage**
 1. Download the plugin matching your CPA container architecture (`amd64` or `arm64`) from [GitHub Releases](https://github.com/amuer2011/cpa-plugin-commandcode-go-plus/releases).
-2. Packages use `commandcode-go-v<version>-linux-debian12-glibc-<arch>.tar.gz`, identifying the OS, Debian 12/glibc build baseline, and architecture (not compatible with Alpine/musl). Extract the package, place its `commandcode-go-v<version>.so` in CPA's plugin directory, and restart CPA; no renaming is needed.
+2. Plugin files use `commandcode-go-v<version>+linux.debian12.glibc.<arch>.so`, identifying the OS, Debian 12/glibc build baseline, and architecture (not compatible with Alpine/musl). Place the file directly in CPA's plugin directory and restart CPA; no extraction or renaming is needed. Platform information follows `-v`, keeping CPA's plugin ID as `commandcode-go`.
 3. Enable the plugin in CPA configuration:
 
    ```yaml
