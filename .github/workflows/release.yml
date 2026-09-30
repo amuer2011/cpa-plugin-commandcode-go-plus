@@ -90,14 +90,14 @@ jobs:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
           python3 scripts/check-plugin.py \
-            "dist/commandcode-go-${PLUGIN_VERSION}-${EXPECTED_ARCH}.so" \
+            "dist/commandcode-go-v${PLUGIN_VERSION}.so" \
             "$PLUGIN_VERSION" "$EXPECTED_ARCH"
 
       - name: Upload tested plugin
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: commandcode-go-${{ matrix.arch }}
-          path: dist/commandcode-go-*-${{ matrix.arch }}.so
+          path: dist/commandcode-go-v*-linux-debian12-glibc-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -130,8 +130,8 @@ jobs:
           set -euo pipefail
           version="${RELEASE_TAG#v}"
           cd dist
-          arm64="commandcode-go-${version}-arm64.so"
-          amd64="commandcode-go-${version}-amd64.so"
+          arm64="commandcode-go-v${version}-linux-debian12-glibc-arm64.tar.gz"
+          amd64="commandcode-go-v${version}-linux-debian12-glibc-amd64.tar.gz"
           test -s "$arm64"
           test -s "$amd64"
           sha256sum "$amd64" "$arm64" > SHA256SUMS
@@ -143,8 +143,9 @@ jobs:
             'Linux amd64 / arm64，基于 Debian 12 / glibc 构建，不适用于 Alpine/musl。' \
             '' \
             '安装前请使用 SHA256SUMS 校验所选架构的文件。' \
-            "当前 CPA 根据文件名识别插件 ID：安装时请将选中的文件改名为 commandcode-go-v${version}.so。" \
-            '不要将两个架构同时放入插件目录，也不要保留带架构的下载文件名。旧版本请移至插件目录之外备份。' \
+            "解压所选架构的 tar.gz，将包内 commandcode-go-v${version}.so 放入 CPA 插件目录并重启，无需重命名。" \
+            '发布包名包含 Linux、Debian 12/glibc 构建基线和 CPU 架构；包内插件名符合 CPA 的 ID/版本识别规则。' \
+            '只安装与容器架构匹配的插件，旧版本请移至插件目录之外备份。' \
             > RELEASE_NOTES.md
           # Manual GitHub Releases already exist when their tag push starts
           # this workflow. Add generated assets to those releases as well.

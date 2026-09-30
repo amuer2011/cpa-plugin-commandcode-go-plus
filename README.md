@@ -6,7 +6,7 @@
 
 **使用方法**
 1. 从 [GitHub Releases](https://github.com/amuer2011/cpa-plugin-commandcode-go-plus/releases) 下载与 CPA 容器架构匹配的插件（`amd64` 或 `arm64`）。
-2. 将文件重命名为 `commandcode-go-v<版本>.so`，放入 CPA 插件目录并重启 CPA。
+2. 发布包格式为 `commandcode-go-v<版本>-linux-debian12-glibc-<架构>.tar.gz`，体现系统、Debian 12/glibc 构建基线与架构（不适用于 Alpine/musl）。解压后将包内 `commandcode-go-v<版本>.so` 放入 CPA 插件目录并重启 CPA，无需重命名。
 3. 在 CPA 配置中启用插件：
 
    ```yaml
@@ -20,7 +20,7 @@
          auth_files: true
    ```
 
-4. 在 CPA 管理页面的认证文件中添加 CommandCode 账号并完成 OAuth 登录。OAuth 登录需要 CPA 管理页面配置 HTTPS 回调地址。
+4. 在 CPA 管理页面的认证文件中添加 CommandCode 账号并完成 OAuth 登录。CPA 可在 nginx 后通过内部 HTTP 回环地址启动 OAuth；浏览器使用的管理页面与回调入口应通过 HTTPS 访问。
 5. 使用模型名 `commandcode-go/<模型名>` 发送请求，例如 `commandcode-go/deepseek-v4.1-flash`。配额可在 CPA 配额页面查看。
 <img width="2774" height="956" alt="2" src="https://github.com/user-attachments/assets/1c7e7762-8d67-4308-925d-64e9366e5180" />
 <img width="1564" height="1150" alt="1" src="https://github.com/user-attachments/assets/a7ec5985-0314-422a-a461-afeda6c233cf" />
@@ -41,7 +41,7 @@ This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowin
 
 **Usage**
 1. Download the plugin matching your CPA container architecture (`amd64` or `arm64`) from [GitHub Releases](https://github.com/amuer2011/cpa-plugin-commandcode-go-plus/releases).
-2. Rename it to `commandcode-go-v<version>.so`, place it in CPA's plugin directory, and restart CPA.
+2. Packages use `commandcode-go-v<version>-linux-debian12-glibc-<arch>.tar.gz`, identifying the OS, Debian 12/glibc build baseline, and architecture (not compatible with Alpine/musl). Extract the package, place its `commandcode-go-v<version>.so` in CPA's plugin directory, and restart CPA; no renaming is needed.
 3. Enable the plugin in CPA configuration:
 
    ```yaml
@@ -55,5 +55,5 @@ This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowin
          auth_files: true
    ```
 
-4. Add a CommandCode account under Auth Files in CPA's management UI and complete OAuth sign-in. An HTTPS callback URL must be configured for OAuth sign-in.
+4. Add a CommandCode account under Auth Files in CPA's management UI and complete OAuth sign-in. CPA can start OAuth with its internal HTTP loopback callback behind nginx; access the management UI and browser callback over HTTPS.
 5. Send requests using `commandcode-go/<model-name>`, for example `commandcode-go/deepseek-v4.1-flash`. View quota on CPA's quota page.

@@ -34,7 +34,8 @@ if ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
-ARTIFACT="${OUTPUT_DIR}/${PLUGIN_NAME}-${PLUGIN_VERSION}-${GOARCH}.so"
+ARTIFACT="${OUTPUT_DIR}/${PLUGIN_NAME}-v${PLUGIN_VERSION}.so"
+PACKAGE="${OUTPUT_DIR}/${PLUGIN_NAME}-v${PLUGIN_VERSION}-${GOOS}-debian12-glibc-${GOARCH}.tar.gz"
 go mod download
 go mod verify
 go vet ./...
@@ -43,4 +44,5 @@ go build -trimpath -buildvcs=false -buildmode=c-shared \
   -ldflags "-X main.pluginVersion=${PLUGIN_VERSION}" \
   -o "$ARTIFACT" ./cmd/commandcodego
 rm -f "${ARTIFACT%.so}.h"
-printf '[build] ok: %s\n' "$ARTIFACT"
+tar -czf "$PACKAGE" -C "$OUTPUT_DIR" "$(basename "$ARTIFACT")"
+printf '[build] ok: %s\n[package] ok: %s\n' "$ARTIFACT" "$PACKAGE"

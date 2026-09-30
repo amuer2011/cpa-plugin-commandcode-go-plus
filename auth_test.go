@@ -60,6 +60,35 @@ func TestStartLoginBuildsSafeCallbackURL(t *testing.T) {
 		t.Fatal("invalid login parameters")
 	}
 }
+
+func TestStartLoginBehindTLSProxy(t *testing.T) {
+	for _, baseURL := range []string{
+		"http://127.0.0.1:8317/v0/management/oauth-callback",
+		"http://[::1]:8317/v0/management/oauth-callback",
+		"http://localhost:8317/v0/management/oauth-callback",
+	} {
+		t.Run(baseURL, func(t *testing.T) {
+			got, err := (&CommandCodeGoPlugin{}).StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: baseURL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			login, err := url.Parse(got.URL)
+			if err != nil || login.Query().Get("callback") != "http://127.0.0.1:8765/callback" {
+				t.Fatal("internal CPA address must not change the vendor callback")
+			}
+		})
+	}
+	for _, baseURL := range []string{
+		"http://cpa.example.test/v0/management/oauth-callback",
+		"https://cpa.example.test/wrong-path",
+		"https://user:pass@cpa.example.test/v0/management/oauth-callback",
+		"",
+	} {
+		if _, err := (&CommandCodeGoPlugin{}).StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: baseURL}); err == nil {
+			t.Errorf("unexpectedly accepted callback %q", baseURL)
+		}
+	}
+}
 func TestPollLoginConsumesAndValidatesCallback(t *testing.T) {
 	dir := t.TempDir()
 	state := "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"

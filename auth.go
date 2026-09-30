@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -60,14 +61,20 @@ func (p *CommandCodeGoPlugin) StartLogin(_ context.Context, req pluginapi.AuthLo
 	}
 	state := base64.RawURLEncoding.EncodeToString(raw)
 	callback, err := url.Parse(req.BaseURL)
-	if err != nil || callback.Scheme != "https" || callback.Host == "" {
-		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("CommandCode login requires a configured HTTPS callback URL")
+	if err != nil || callback.Host == "" || callback.User != nil {
+		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("CommandCode login requires a valid CPA management callback URL")
+	}
+	// CPA supplies an internal loopback URL when TLS terminates at a reverse
+	// proxy. This URL is only validated here; it is not sent to CommandCode.
+	loopback := net.ParseIP(callback.Hostname())
+	if callback.Scheme != "https" && !(callback.Scheme == "http" && (callback.Hostname() == "localhost" || loopback != nil && loopback.IsLoopback())) {
+		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("CommandCode login requires HTTPS or an HTTP loopback management callback URL")
 	}
 	if callback.Path != "/v0/management/oauth-callback" {
 		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("CommandCode login requires the configured CPA management callback URL")
 	}
-	// Studio accepts only loopback callbacks. The browser-side bridge forwards to
-	// the explicitly configured HTTPS management origin, never a request Host.
+	// Studio accepts only loopback callbacks. Keep the vendor callback fixed,
+	// independent of CPA's internal management URL.
 	callback = &url.URL{Scheme: "http", Host: "127.0.0.1:8765", Path: "/callback"}
 	login := url.URL{Scheme: "https", Host: "commandcode.ai", Path: "/studio/auth/cli"}
 	lq := login.Query()
