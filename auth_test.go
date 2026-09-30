@@ -35,14 +35,15 @@ func (f fakeLoginHTTP) DoStream(context.Context, pluginapi.HTTPRequest) (plugina
 	panic("unexpected stream")
 }
 func TestStartLoginBuildsSafeCallbackURL(t *testing.T) {
-	got, err := (&CommandCodeGoPlugin{}).StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: "https://cpa.example.test/v0/management/oauth-callback"})
+	p := &CommandCodeGoPlugin{}
+	got, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: "https://cpa.example.test/v0/management/oauth-callback"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.State == "" || len(got.State) < 40 || time.Until(got.ExpiresAt) <= 0 {
 		t.Fatal("invalid state or expiry")
 	}
-	login, err := url.Parse(got.URL)
+	login, err := url.Parse(p.logins[got.State].vendorURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,11 +69,12 @@ func TestStartLoginBehindTLSProxy(t *testing.T) {
 		"http://localhost:8317/v0/management/oauth-callback",
 	} {
 		t.Run(baseURL, func(t *testing.T) {
-			got, err := (&CommandCodeGoPlugin{}).StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: baseURL})
+			p := &CommandCodeGoPlugin{}
+			got, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: baseURL})
 			if err != nil {
 				t.Fatal(err)
 			}
-			login, err := url.Parse(got.URL)
+			login, err := url.Parse(p.logins[got.State].vendorURL)
 			if err != nil || login.Query().Get("callback") != "http://127.0.0.1:8765/callback" {
 				t.Fatal("internal CPA address must not change the vendor callback")
 			}

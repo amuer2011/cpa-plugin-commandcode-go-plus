@@ -27,6 +27,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -44,7 +45,7 @@ const (
 	upstreamBaseURL = "https://api.commandcode.ai"
 )
 
-const pluginVersion = "1.2.6"
+const pluginVersion = "1.2.9"
 
 //go:embed assets/cmdsymbol-dark.svg
 var commandCodeLogo []byte
@@ -55,6 +56,8 @@ type CommandCodeGoPlugin struct {
 	router   *Router
 	executor *Executor
 	cfg      *pluginConfig
+	loginMu  sync.Mutex
+	logins   map[string]*relayLogin
 }
 
 // Build constructs the host-facing plugin description from the raw
@@ -78,6 +81,7 @@ func Build(configYAML []byte) (pluginapi.Plugin, *CommandCodeGoPlugin) {
 			GitHubRepository: "https://github.com/sperictao/cpa-plugin-commandcode-go",
 		},
 		Capabilities: pluginapi.Capabilities{
+			ManagementAPI:         p,
 			AuthProvider:          p,
 			QuotaProvider:         p,
 			ModelProvider:         p.models,

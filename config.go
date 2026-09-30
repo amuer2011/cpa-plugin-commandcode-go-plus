@@ -24,6 +24,9 @@ type pluginConfig struct {
 	// BaseURL overrides the upstream API root (tests, mirrors).
 	BaseURL string `yaml:"base_url"`
 
+	// Optional when the management frontend is hosted on a different origin.
+	OAuthPublicURL string `yaml:"oauth_public_url"`
+
 	// Models declares which models this plugin claims. Entries are structured
 	// ("- alias: x / name: y") or bare strings ("- y", alias == name).
 	Models []ModelEntry `yaml:"models"`

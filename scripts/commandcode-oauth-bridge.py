@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Receive CommandCode's browser-local callback and submit it to remote CPA.
-
-Uses Python's standard library. Credentials stay in memory and are never logged.
-"""
+"""Receive CommandCode callbacks for a login initiated in CPA. No admin key needed."""
 import argparse
+import base64
 import hmac
 import html
 import ipaddress
@@ -13,23 +11,17 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-
-PROVIDER = "commandcode-go"
 LOCAL_ORIGIN = "http://127.0.0.1:8765"
+RELAY_PATH = "/v0/resource/plugins/commandcode-go/oauth"
 MAX_BODY = 65536
-SESSION_TTL = 30 * 60  # Match CPA's pending OAuth session lifetime.
-# The management site may reject Python's default User-Agent at its edge proxy.
+SESSION_TTL = 30 * 60
 BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
 
 class BridgeError(Exception):
-    pass
-
-
-class NeedsConnection(BridgeError):
     pass
 
 
@@ -38,38 +30,35 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 
-def management_base(raw):
-    parsed = urlsplit(raw.strip())
+def cpa_origin(raw):
+    parsed = urlsplit(raw)
     try:
         loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
     except ValueError:
         loopback = parsed.hostname == "localhost"
-    if (not parsed.hostname or parsed.username is not None
-            or parsed.password is not None or parsed.query or parsed.fragment
+    if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or parsed.path not in ("", "/")
             or parsed.scheme not in ("http", "https")
             or (parsed.scheme == "http" and not loopback)):
-        raise BridgeError("管理地址须为 HTTPS，或本机 HTTP 回环地址。")
-    if parsed.path not in ("", "/", "/management.html", "/v0/management", "/v0/management/"):
-        raise BridgeError("请填写 CPA 管理地址，例如 https://cpa.example.com。")
-    return f"{parsed.scheme}://{parsed.netloc}/v0/management"
+        raise BridgeError("CPA 授权地址无效，请从 CPA 管理页重新发起登录。")
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 class CPA:
-    def __init__(self, base, key):
-        self.base = management_base(base)
-        self.key = key
-        # Do not send the management key to redirect destinations or local proxies.
-        from urllib.request import ProxyHandler
+    def __init__(self, origin, state, ticket):
+        self.base = cpa_origin(origin) + RELAY_PATH
+        self.state, self.ticket = state, ticket
         self.opener = build_opener(ProxyHandler({}), NoRedirects())
 
     def call(self, path, payload=None):
-        body = None if payload is None else json.dumps(payload).encode()
-        req = Request(self.base + path, data=body, headers={
-            "Authorization": "Bearer " + self.key,
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": BROWSER_USER_AGENT,
-        })
+        headers = {"X-OAuth-State": self.state, "X-OAuth-Ticket": self.ticket,
+                   "Accept": "application/json", "User-Agent": BROWSER_USER_AGENT}
+        if payload is not None:
+            raw = json.dumps(payload, ensure_ascii=True).encode()
+            headers["X-OAuth-Callback"] = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        # The SDK exposes GET-only resource routes. Credentials use headers,
+        # so access logs never contain the API key or the temporary ticket.
+        req = Request(self.base + path, headers=headers)
         try:
             with self.opener.open(req, timeout=20) as response:
                 raw = response.read(MAX_BODY + 1)
@@ -80,256 +69,210 @@ class CPA:
                 raise BridgeError("CPA 返回的响应格式不正确。")
             return result
         except HTTPError as error:
-            if error.code == 401:
-                raise BridgeError("CPA 管理密钥不正确。") from None
             if error.code == 403:
-                raise BridgeError("CPA 拒绝请求，请检查管理密钥及 nginx 白名单。") from None
-            raise BridgeError(f"CPA 返回 HTTP {error.code}，请检查服务器日志。") from None
+                raise BridgeError("CPA 拒绝本次授权回调，请检查 nginx 白名单并从 CPA 重新登录。") from None
+            if error.code in (409, 410):
+                raise BridgeError("本次授权已过期或完成，请从 CPA 重新发起登录。") from None
+            raise BridgeError(f"CPA 返回 HTTP {error.code}，请检查插件版本及服务器日志。") from None
         except (URLError, TimeoutError, OSError, ValueError):
-            raise BridgeError("无法连接 CPA 管理接口，请检查地址、网络及证书。") from None
+            raise BridgeError("无法连接 CPA，请检查网络及证书；恢复后可重试本次回调。") from None
 
 
 class Session:
     def __init__(self):
         self.lock = threading.RLock()
         self.csrf = secrets.token_urlsafe(32)
-        self.client = None
-        self.state = ""
-        self.expires = 0
-        self.submitted = False
-        self.complete = False
-        self.pending = None
-        self.pending_expires = 0
+        self.connections = {}
 
-    def start(self, address, key):
-        if not key.strip():
-            raise BridgeError("请输入 CPA 管理密钥。")
+    def connect(self, payload):
+        if not isinstance(payload, dict):
+            raise BridgeError("授权会话格式不正确。")
+        state, ticket, login = (payload.get(k, "") for k in ("state", "ticket", "login"))
+        if not all(isinstance(v, str) and 40 <= len(v) <= 128
+                   and all(c.isascii() and (c.isalnum() or c in "-_") for c in v)
+                   for v in (state, ticket)):
+            raise BridgeError("授权会话无效，请更新插件并从 CPA 重新登录。")
+        parsed = urlsplit(login)
+        query = parse_qs(parsed.query)
+        if (parsed.scheme != "https" or parsed.netloc != "commandcode.ai"
+                or parsed.path != "/studio/auth/cli" or parsed.fragment
+                or query.get("state") != [state]
+                or query.get("callback") != [LOCAL_ORIGIN + "/callback"]
+                or query.get("mode") != ["redirect"]):
+            raise BridgeError("插件返回了不兼容的授权地址。")
+        client = CPA(payload.get("cpa", ""), state, ticket)
+        result = client.call("/check")
+        if result.get("status") != "wait":
+            raise BridgeError("本次授权已完成或失效，请从 CPA 重新登录。")
         with self.lock:
-            client = CPA(address, key.strip())
-            result = client.call("/commandcode-go-auth-url")
-            state = result.get("state", "")
-            login = result.get("url", "")
-            parsed = urlsplit(login)
-            query = parse_qs(parsed.query)
-            if (not isinstance(state, str) or not state
-                    or parsed.scheme != "https" or parsed.netloc != "commandcode.ai"
-                    or parsed.path != "/studio/auth/cli"
-                    or query.get("state") != [state]
-                    or query.get("callback") != [LOCAL_ORIGIN + "/callback"]
-                    or query.get("mode") != ["redirect"]):
-                raise BridgeError("插件返回了不兼容的授权地址，请确认插件版本。")
-            self.client, self.state = client, state
-            self.expires = time.monotonic() + SESSION_TTL
-            self.submitted = False
-            self.complete = False
-            self.pending = None
-            return login
+            self.connections = {k: v for k, v in self.connections.items() if v["expires"] > time.monotonic()}
+            self.connections[state] = {"client": client, "expires": time.monotonic() + SESSION_TTL,
+                                       "pending": None, "submitted": False}
+        return login
 
-    def check(self, state):
-        if time.monotonic() >= self.expires:
-            self.client = None
-        if not self.client:
-            raise NeedsConnection("助手尚未连接 CPA，或连接已过期。请输入管理密钥继续保存本次授权。")
-        if not isinstance(state, str) or not state or len(state) > 128:
-            raise BridgeError("CommandCode 未返回有效的授权 state，请重新发起授权。")
-
-    def resume(self, address, key):
-        with self.lock:
-            if not self.pending or time.monotonic() >= self.pending_expires:
-                self.pending = None
-                raise BridgeError("本机保留的授权已过期，请重新发起授权。")
-            if not key.strip():
-                raise BridgeError("请输入 CPA 管理密钥。")
-            self.client = CPA(address, key.strip())
-            self.expires = time.monotonic() + SESSION_TTL
-            self.submit(self.pending)
-
-    def has_pending(self):
-        with self.lock:
-            if time.monotonic() >= self.pending_expires:
-                self.pending = None
-            return self.pending is not None
+    def connection(self, state):
+        item = self.connections.get(state)
+        if not item or time.monotonic() >= item["expires"]:
+            self.connections.pop(state, None)
+            raise BridgeError("本次授权未连接助手或已过期，请保持助手运行，从 CPA 管理页重新登录。")
+        return item
 
     def submit(self, payload):
         with self.lock:
             state = payload.get("state", "")
-            if not isinstance(state, str) or not state or len(state) > 128:
-                raise BridgeError("CommandCode 未返回有效的授权 state，请重新发起授权。")
-            if self.submitted and hmac.compare_digest(self.state, state):
-                raise BridgeError("该授权回调已提交。")
-            body = {"provider": PROVIDER, "state": state}
+            item = self.connection(state)
+            if item["submitted"]:
+                return state
+            callback = {"state": state}
             if payload.get("error"):
-                body["error"] = "CommandCode login was rejected"
+                callback["error"] = "CommandCode login was rejected"
             else:
-                if not all(isinstance(payload.get(k), str) and payload[k]
-                           for k in ("apiKey", "userId", "userName", "keyName")):
+                keys = ("apiKey", "userId", "userName", "keyName")
+                if not all(isinstance(payload.get(k), str) and payload[k] for k in keys):
                     raise BridgeError("CommandCode 返回的凭据不完整。")
-                credentials = {k: payload[k] for k in
-                               ("apiKey", "userId", "userName", "keyName", "email") if k in payload}
-                body["code"] = json.dumps(credentials)
-            try:
-                self.check(state)
-            except NeedsConnection:
-                # A login started in CPA, or before the helper restarted, can
-                # still be resumed. Keep its callback in memory until the user
-                # supplies management credentials; never reflect it into HTML.
-                self.pending = dict(payload)
-                self.pending_expires = time.monotonic() + 600
-                raise
-            # CPA owns the OAuth state registry. Validate there rather than
-            # requiring every login to have been started in this helper.
-            result = self.client.call("/get-auth-status?" + urlencode({"state": state}))
-            if result.get("status") == "ok":
-                self.state = state
-                self.submitted = self.complete = True
-                self.pending = self.client = None
-                return
-            if result.get("status") != "wait":
-                self.pending = None
-                raise BridgeError("CPA 中的本次授权已失效或已经完成，请重新发起授权。")
-            self.client.call("/oauth-callback", body)
-            self.state = state
-            self.submitted = True
-            self.complete = False
-            self.pending = None
+                callback["code"] = json.dumps({k: payload[k] for k in (*keys, "email") if k in payload})
+            item["pending"] = callback
+            self.retry(state)
+            return state
 
-    def status(self):
+    def retry(self, state):
         with self.lock:
-            if self.complete:
-                return "ok"
-            self.check(self.state)
-            result = self.client.call("/get-auth-status?" + urlencode({"state": self.state}))
-            status = result.get("status")
-            if status == "ok":
-                self.client = None  # Release the management key once the host saved auth.
-                self.complete = True
-                return "ok"
-            if status == "error":
-                self.client = None
-                raise BridgeError("CPA 未能保存账号，请检查 CPA 日志后重新登录。")
-            return "wait"
+            item = self.connection(state)
+            if item["pending"] is not None:
+                result = item["client"].call("/submit", item["pending"])
+                if result.get("status") != "received":
+                    raise BridgeError("CPA 未接收授权回调，请检查服务器日志。")
+                item["pending"] = None
+                item["submitted"] = True
+
+    def status(self, state):
+        with self.lock:
+            self.retry(state)
+            result = self.connection(state)["client"].call("/check")
+            if result.get("status") == "error":
+                self.connections.pop(state, None)
+                raise BridgeError("CPA 未能验证账号，请查看原 CPA 管理页的登录结果。")
+            return result.get("status")
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
-        pass  # URLs and form bodies can contain authentication data.
+        pass
 
-    def page(self, title, content, status=200, refresh=False):
+    def page(self, title, content, status=200, script="", refresh=""):
+        nonce = secrets.token_urlsafe(20)
         page = ('<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
                 '<meta name="viewport" content="width=device-width,initial-scale=1">'
-                + ('<meta http-equiv="refresh" content="2;url=/status">' if refresh else '')
+                + ('<meta http-equiv="refresh" content="3;url=' + html.escape(refresh, quote=True) + '">' if refresh else '')
                 + '<title>' + html.escape(title) + '</title><style>'
                 'body{font:16px system-ui;max-width:560px;margin:8vh auto;padding:24px;line-height:1.7}'
-                'input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0;font:inherit}'
-                '</style><h1>' + html.escape(title) + '</h1>' + content + '</html>').encode()
+                '</style><h1>' + html.escape(title) + '</h1>' + content
+                + ('<script nonce="' + nonce + '">' + script + '</script>' if script else '') + '</html>').encode()
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://commandcode.ai; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-" + nonce + "'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
         self.end_headers()
         self.wfile.write(page)
 
-    def connection_page(self, message=""):
-        pending = self.server.session.has_pending()
-        title = "继续保存账号" if pending else "CommandCode 登录"
-        action = "/resume" if pending else "/start"
-        intro = ("授权凭据已在本机收到。连接 CPA 后会继续保存，无需再次授权。"
-                 if pending else "输入 CPA 管理地址与管理密钥，继续完成 CommandCode 授权。账号会自动保存到 CPA。")
-        self.page(title, '<p>' + html.escape(message or intro) + '</p>'
-                  '<p>密钥仅在本机内存中使用，不写入文件或日志。完成后可关闭助手。</p>'
-                  '<form method="post" action="' + action + '">'
-                  '<input type="hidden" name="csrf" value="' + self.server.session.csrf + '">'
-                  '<label>CPA 管理地址<input name="address" type="url" required value="'
-                  + html.escape(self.server.cpa_url, quote=True) + '"></label>'
-                  '<label>CPA 管理密钥<input name="key" type="password" autocomplete="off" required></label>'
-                  '<button>' + ("连接 CPA 并保存账号" if pending else "开始授权") + '</button></form>')
+    def valid_host(self):
+        return self.headers.get("Host") in {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
 
     def do_GET(self):
-        if self.path == "/":
-            self.connection_page()
-        elif self.path == "/status":
+        if not self.valid_host():
+            self.page("请求被拒绝", "<p>本地地址不匹配。</p>", 403)
+            return
+        parsed = urlsplit(self.path)
+        if parsed.path == "/":
+            self.page("回调助手已就绪", "<p>请回到 CPA 管理页点击 CommandCode 登录。无需在这里输入地址或管理密钥。</p>")
+        elif parsed.path == "/connect":
+            script = '''(async()=>{try{const b=JSON.parse(decodeURIComponent(location.hash.slice(1)));history.replaceState(null,"","/connect");b.csrf=CSRF;const r=await fetch("/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});const d=await r.json();if(!r.ok)throw Error(d.error);location.replace(d.login);}catch(e){document.getElementById("message").textContent=e.message;}})();'''.replace("CSRF", json.dumps(self.server.session.csrf))
+            self.page("正在接续 CPA 授权", '<p id="message">正在连接本次登录会话，无需输入管理密钥。</p>', script=script)
+        elif parsed.path == "/status":
+            state = parse_qs(parsed.query).get("state", [""])[0]
             try:
-                status = self.server.session.status()
-                if status == "ok":
-                    self.page("登录成功", '<p>账号已保存到 CPA。回到管理页面刷新认证文件列表即可使用。</p>')
+                status = self.server.session.status(state)
+                if status == "validated":
+                    self.page("授权验证完成", "<p>请回到原 CPA 管理页查看账号保存结果。可以关闭此页面。</p>")
                 else:
-                    self.page("正在保存账号", '<p>授权已接收，正在等待 CPA 验证并保存账号。</p>', refresh=True)
+                    self.page("正在等待 CPA", "<p>授权回调已提交，请保持原 CPA 管理页打开，由 CPA 验证并保存账号。</p>", refresh="/status?state=" + state)
             except BridgeError as error:
-                self.page("登录未完成", '<p>' + html.escape(str(error)) + '</p><a href="/">重新登录</a>', 400)
+                self.page("登录未完成", '<p>' + html.escape(str(error)) + '</p><a href="' + html.escape(self.path, quote=True) + '">重试</a>', 400)
         else:
-            self.page("未找到页面", '<a href="/">返回首页</a>', 404)
+            self.page("未找到页面", '<a href="/">返回</a>', 404)
 
     def do_POST(self):
         self.connection.settimeout(30)
         try:
-            if self.path not in ("/start", "/resume", "/callback"):
-                raise BridgeError("无效的回调路径。")
-            # Browsers can send an opaque or absent Origin on navigational
-            # form POSTs. The per-page CSRF token and pending OAuth state below
-            # remain mandatory even when Origin cannot identify the sender.
-            allowed_origins = ({LOCAL_ORIGIN, "http://localhost:8765"}
-                               if self.path in ("/start", "/resume") else {"https://commandcode.ai"})
-            if self.headers.get("Origin") not in allowed_origins | {None, "null"}:
-                self.page("请求被拒绝", '<p>请求来源不匹配。</p>', 403)
-                return
+            if not self.valid_host() or self.path not in ("/connect", "/callback"):
+                raise BridgeError("本地回调地址不匹配。")
+            local = {LOCAL_ORIGIN, f"http://127.0.0.1:{self.server.server_port}", f"http://localhost:{self.server.server_port}"}
+            allowed = local if self.path == "/connect" else {"https://commandcode.ai", None, "null"}
+            if self.headers.get("Origin") not in allowed:
+                raise BridgeError("请求来源不匹配。")
             size = int(self.headers.get("Content-Length", "0"))
-            if size <= 0 or size > MAX_BODY:
+            if not 0 < size <= MAX_BODY:
                 raise BridgeError("回调数据大小不正确。")
             body = self.rfile.read(size)
             kind = self.headers.get("Content-Type", "").split(";", 1)[0].strip()
-            if kind == "application/x-www-form-urlencoded":
+            if kind == "application/x-www-form-urlencoded" and self.path == "/callback":
                 fields = parse_qs(body.decode(), keep_blank_values=True, max_num_fields=32)
                 if any(len(values) != 1 for values in fields.values()):
                     raise BridgeError("回调字段重复。")
                 payload = {key: values[0] for key, values in fields.items()}
-            elif kind == "application/json" and self.path == "/callback":
+            elif kind == "application/json":
                 payload = json.loads(body)
                 if not isinstance(payload, dict) or not all(isinstance(v, str) for v in payload.values()):
-                    raise BridgeError("回调数据格式不正确。")
+                    raise BridgeError("回调格式不正确。")
             else:
-                raise BridgeError("不支持的回调数据格式。")
-            if self.path in ("/start", "/resume"):
+                raise BridgeError("不支持的回调格式。")
+            if self.path == "/connect":
                 if not hmac.compare_digest(payload.get("csrf", ""), self.server.session.csrf):
-                    raise BridgeError("登录页面已过期，请重新打开首页。")
-            if self.path == "/start":
-                login = self.server.session.start(payload.get("address", ""), payload.get("key", ""))
-                self.send_response(303)
-                self.send_header("Location", login)
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-            elif self.path == "/resume":
-                self.server.session.resume(payload.get("address", ""), payload.get("key", ""))
-                self.page("正在保存账号", '<p>授权已提交，正在等待 CPA 验证并保存账号。</p>', refresh=True)
+                    raise BridgeError("本地连接页面已过期。")
+                login = self.server.session.connect(payload)
+                self.send_json(200, {"login": login})
             else:
-                self.server.session.submit(payload)
-                self.page("正在保存账号", '<p>授权已接收，正在等待 CPA 验证并保存账号。</p>', refresh=True)
-        except NeedsConnection as error:
-            self.connection_page(str(error))
-        except (BridgeError, ValueError, UnicodeError) as error:
+                state = self.server.session.submit(payload)
+                self.page("正在等待 CPA", "<p>回调已提交，请保持原 CPA 管理页打开，等待账号验证和保存。</p>", refresh="/status?state=" + state)
+        except (BridgeError, ValueError, UnicodeError, TypeError) as error:
             message = str(error) if isinstance(error, BridgeError) else "回调数据格式不正确。"
-            self.page("登录未完成", '<p>' + html.escape(message) + '</p><a href="/">重新登录</a>', 400)
+            if self.path == "/connect":
+                self.send_json(400, {"error": message})
+            else:
+                state = payload.get("state", "") if "payload" in locals() else ""
+                retry = ('<a href="/status?state=' + html.escape(state, quote=True) + '">重试提交</a>') if state in self.server.session.connections else '<a href="/">返回</a>'
+                self.page("登录未完成", '<p>' + html.escape(message) + '</p>' + retry, 400)
+
+    def send_json(self, status, payload):
+        raw = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cpa-url", default="", help="CPA management URL (can also be entered in the local page)")
-    args = parser.parse_args()
+    # Accepted for compatibility; login context now comes automatically from CPA.
+    parser.add_argument("--cpa-url", default="", help=argparse.SUPPRESS)
+    parser.parse_args()
     try:
         server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
     except OSError:
-        parser.exit(1, "无法监听 127.0.0.1:8765，请关闭占用该端口的程序。\n")
+        parser.exit(1, "无法监听 127.0.0.1:8765，请关闭旧助手或占用该端口的程序。\n")
     server.session = Session()
-    server.cpa_url = args.cpa_url
-    print("回调助手已启动，请打开 " + LOCAL_ORIGIN, flush=True)
+    print("回调助手已就绪，请在 CPA 管理页点击 CommandCode 登录。无需输入管理密钥。", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.session.client = None
+        server.session.connections.clear()
         server.server_close()
 
 

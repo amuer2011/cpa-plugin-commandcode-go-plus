@@ -85,6 +85,7 @@ type abiRegistration struct {
 }
 
 type abiCapabilities struct {
+	ManagementAPI         bool                         `json:"management_api"`
 	AuthProvider          bool                         `json:"auth_provider"`
 	QuotaProvider         bool                         `json:"quota_provider"`
 	ModelProvider         bool                         `json:"model_provider"`
@@ -220,6 +221,24 @@ func handleABIMethod(ctx context.Context, method string, request []byte) ([]byte
 		return nil, errPlugin
 	}
 	switch method {
+	case pluginabi.MethodManagementRegister:
+		var req pluginapi.ManagementRegistrationRequest
+		if err := json.Unmarshal(request, &req); err != nil {
+			return nil, err
+		}
+		resp, err := p.RegisterManagement(ctx, req)
+		// Handlers are process-local; the host installs its RPC adapter.
+		for i := range resp.Resources {
+			resp.Resources[i].Handler = nil
+		}
+		return abiOKEnvelopeWithError(resp, err)
+	case pluginabi.MethodManagementHandle:
+		var req pluginapi.ManagementRequest
+		if err := json.Unmarshal(request, &req); err != nil {
+			return nil, err
+		}
+		resp, err := p.HandleManagement(ctx, req)
+		return abiOKEnvelopeWithError(resp, err)
 	case pluginabi.MethodExecutorIdentifier, pluginabi.MethodAuthIdentifier, pluginabi.MethodQuotaIdentifier:
 		return abiOKEnvelope(abiIdentifierResponse{Identifier: p.Identifier()})
 	case pluginabi.MethodAuthParse:
@@ -362,6 +381,7 @@ func handleRegister(request []byte) ([]byte, error) {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata:      built.Metadata,
 		Capabilities: abiCapabilities{
+			ManagementAPI:         built.Capabilities.ManagementAPI != nil,
 			AuthProvider:          built.Capabilities.AuthProvider != nil,
 			QuotaProvider:         built.Capabilities.QuotaProvider != nil,
 			ModelProvider:         built.Capabilities.ModelProvider != nil,

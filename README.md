@@ -20,7 +20,7 @@
          auth_files: true
    ```
 
-4. 在浏览器所在电脑使用 Python 3 运行 [commandcode-oauth-bridge.py](scripts/commandcode-oauth-bridge.py)（也可从 Release 下载该原文件）。打开 `http://127.0.0.1:8765`，输入 CPA 管理地址和管理密钥后开始授权。助手接收 CommandCode 的本地表单回调，自动提交 CPA 并等待账号保存成功。授权期间保持助手运行，完成后可关闭。CPA 管理页面通过 HTTPS 访问，容器内部可使用 HTTP 回环地址。
+4. 在浏览器所在电脑使用 Python 3 运行 [commandcode-oauth-bridge.py](scripts/commandcode-oauth-bridge.py)（也可从 Release 下载该原文件），然后在 CPA 管理页点击 CommandCode 登录。助手自动接续本次会话并提交授权回调，无需再次输入地址或管理密钥。授权期间保持助手和原 CPA 管理页打开，等待 CPA 保存账号。
 5. 使用模型名 `commandcode-go/<模型名>` 发送请求，例如 `commandcode-go/deepseek-v4.1-flash`。配额可在 CPA 配额页面查看。
 <img width="2774" height="956" alt="2" src="https://github.com/user-attachments/assets/1c7e7762-8d67-4308-925d-64e9366e5180" />
 <img width="1564" height="1150" alt="1" src="https://github.com/user-attachments/assets/a7ec5985-0314-422a-a461-afeda6c233cf" />
@@ -42,12 +42,14 @@ CommandCode 只允许 localhost 回调，并在 `mode=redirect` 下通过表单 
 本地助手使用 Python 3 标准库，无需安装依赖：
 
 ```bash
-python commandcode-oauth-bridge.py --cpa-url https://你的CPA域名
+python commandcode-oauth-bridge.py
 ```
 
-然后打开 `http://127.0.0.1:8765`，在助手页面开始授权。助手只监听 `127.0.0.1:8765`，校验回调来源和当前会话的 state，并通过带管理认证的 `/v0/management/oauth-callback` 提交凭据。管理密钥与 API key 不写入文件、页面或日志，也无需粘贴到聊天中。若 nginx 配置了白名单，浏览器所在电脑必须能够访问 CPA 管理接口。助手不会改变管理接口的认证或白名单。
+保持助手运行，在 CPA 管理页点击 CommandCode 登录即可。流程为：CPA → 自动连接本地助手 → CommandCode 授权 → 助手接收回调 → CPA 验证并保存。原 CPA 管理页需保持打开，因为 CPA 在该页面的登录状态轮询中保存认证文件。
 
-也可在助手运行期间从 CPA 管理页面发起授权。若助手尚未连接 CPA，回调页面会显示“继续保存账号”：输入管理地址与管理密钥即可保存本次授权，无需重新授权。回调只在本机内存中保留 10 分钟；最终由 CPA 确认 state 是否仍有效。助手连接期限与 CPA 的 30 分钟 OAuth 会话期限一致，已完成的会话会直接显示成功。
+插件为每次登录生成独立的临时回调凭证，绑定 state，30 分钟过期，只能提交一次回调。助手不会读取或接收管理密钥，也没有管理地址或密钥输入框。临时凭证通过 URL fragment 传给本地助手，API key 和回调凭证通过 HTTPS 请求头提交，不进入请求 URL、页面或普通访问日志。CPA 管理接口的认证保持原样。
+
+助手只监听 `127.0.0.1:8765`。nginx 须将 `/v0/resource/plugins/commandcode-go/oauth/` 转发给 CPA；现有白名单也必须允许浏览器所在电脑访问。默认自动使用 CPA 管理页的域名；若管理前端位于不同域名，可在插件配置中设置 `oauth_public_url: https://你的CPA域名`。更新插件时也请更新并重启助手。助手显示“授权验证完成”后，以 CPA 管理页的账号保存结果为准。
 
 ## English
 
@@ -69,5 +71,5 @@ This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowin
          auth_files: true
    ```
 
-4. Run [commandcode-oauth-bridge.py](scripts/commandcode-oauth-bridge.py) with Python 3 on the computer running your browser (also available as a raw Release asset). Open `http://127.0.0.1:8765`, enter the CPA management URL and management key, and start authorization there. Keep the helper running until it receives CommandCode's local form POST, submits the callback to CPA, and confirms the account was saved. No dependencies are required, and credentials are never written to files or logs. Use HTTPS for the remote management UI; CPA's internal loopback callback can use HTTP.
+4. Run [commandcode-oauth-bridge.py](scripts/commandcode-oauth-bridge.py) with Python 3 on the computer running your browser (also available as a raw Release asset). Start login from the CPA management page. The helper automatically connects using a temporary session ticket and never asks for or receives your management key. Keep both the helper and the original CPA page open until CPA verifies and saves the account. Update both the plugin and helper together.
 5. Send requests using `commandcode-go/<model-name>`, for example `commandcode-go/deepseek-v4.1-flash`. View quota on CPA's quota page.

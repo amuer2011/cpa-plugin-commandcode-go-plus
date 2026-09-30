@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -82,7 +81,7 @@ func (p *CommandCodeGoPlugin) StartLogin(_ context.Context, req pluginapi.AuthLo
 	lq.Set("state", state)
 	lq.Set("mode", "redirect")
 	login.RawQuery = lq.Encode()
-	return pluginapi.AuthLoginStartResponse{Provider: Provider, URL: login.String(), State: state, ExpiresAt: time.Now().Add(10 * time.Minute)}, nil
+	return p.startRelay(req, state, login.String())
 }
 
 type commandCodeCredentials struct {
@@ -104,29 +103,39 @@ func commandCodeAuthFileName(email string) (string, error) {
 }
 
 func (p *CommandCodeGoPlugin) PollLogin(ctx context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+	resp, err := p.pollLogin(ctx, req)
+	p.finishRelay(req.State, resp, err)
+	return resp, err
+}
+
+func (p *CommandCodeGoPlugin) pollLogin(ctx context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
 	state := strings.TrimSpace(req.State)
 	if state == "" || strings.ContainsAny(state, "/\\") || state == "." || state == ".." {
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "Invalid login state"}, nil
 	}
-	file := filepath.Join(req.Host.AuthDir, ".oauth-"+Provider+"-"+state+".oauth")
-	processing := file + ".processing"
-	if err := rename(file, processing); err != nil {
-		if isNotExist(err) {
-			return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusPending}, nil
+	data := p.claimRelay(state)
+	if data == nil {
+		file := filepath.Join(req.Host.AuthDir, ".oauth-"+Provider+"-"+state+".oauth")
+		processing := file + ".processing"
+		if err := rename(file, processing); err != nil {
+			if isNotExist(err) {
+				return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusPending}, nil
+			}
+			return pluginapi.AuthLoginPollResponse{}, fmt.Errorf("claim OAuth callback: %w", err)
 		}
-		return pluginapi.AuthLoginPollResponse{}, fmt.Errorf("claim OAuth callback: %w", err)
-	}
-	defer removeFile(processing)
-	data, err := readFile(processing)
-	if err != nil {
-		return pluginapi.AuthLoginPollResponse{}, fmt.Errorf("read OAuth callback: %w", err)
+		defer removeFile(processing)
+		var err error
+		data, err = readFile(processing)
+		if err != nil {
+			return pluginapi.AuthLoginPollResponse{}, fmt.Errorf("read OAuth callback: %w", err)
+		}
 	}
 	var callback struct {
 		Code  string `json:"code"`
 		State string `json:"state"`
 		Error string `json:"error"`
 	}
-	if err = json.Unmarshal(data, &callback); err != nil {
+	if err := json.Unmarshal(data, &callback); err != nil {
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "Invalid OAuth callback data"}, nil
 	}
 	if callback.State != state {
@@ -136,7 +145,7 @@ func (p *CommandCodeGoPlugin) PollLogin(ctx context.Context, req pluginapi.AuthL
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "CommandCode login was rejected"}, nil
 	}
 	var creds commandCodeCredentials
-	if err = json.Unmarshal([]byte(callback.Code), &creds); err != nil || creds.APIKey == "" || creds.UserID == "" || creds.UserName == "" || creds.KeyName == "" {
+	if err := json.Unmarshal([]byte(callback.Code), &creds); err != nil || creds.APIKey == "" || creds.UserID == "" || creds.UserName == "" || creds.KeyName == "" {
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "Incomplete CommandCode credentials"}, nil
 	}
 	if req.HTTPClient == nil {
