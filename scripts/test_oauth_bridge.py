@@ -20,6 +20,9 @@ class FakeCPA(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if not self.headers.get("User-Agent", "").startswith("Mozilla/5.0"):
+            self.send_error(403)
+            return
         if self.headers.get("Authorization") != "Bearer test-management-key":
             self.send_error(401)
             return
@@ -34,6 +37,9 @@ class FakeCPA(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_POST(self):
+        if not self.headers.get("User-Agent", "").startswith("Mozilla/5.0"):
+            self.send_error(403)
+            return
         if self.headers.get("Authorization") != "Bearer test-management-key":
             self.send_error(401)
             return

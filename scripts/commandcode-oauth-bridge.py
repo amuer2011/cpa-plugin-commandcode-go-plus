@@ -20,6 +20,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 PROVIDER = "commandcode-go"
 LOCAL_ORIGIN = "http://127.0.0.1:8765"
 MAX_BODY = 65536
+# The management site may reject Python's default User-Agent at its edge proxy.
+BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
 
 class BridgeError(Exception):
@@ -61,6 +63,7 @@ class CPA:
             "Authorization": "Bearer " + self.key,
             "Accept": "application/json",
             "Content-Type": "application/json",
+            "User-Agent": BROWSER_USER_AGENT,
         })
         try:
             with self.opener.open(req, timeout=20) as response:
