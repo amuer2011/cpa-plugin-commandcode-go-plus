@@ -32,17 +32,17 @@ func relayRequest(p *CommandCodeGoPlugin, start pluginapi.AuthLoginStartResponse
 	return resp
 }
 
-func TestRelayBootstrapUsesBrowserOriginAndSessionTicket(t *testing.T) {
+func TestManualAPIKeyPageUsesSessionTicket(t *testing.T) {
 	p, start := newRelayTest(t)
 	if !strings.HasPrefix(start.URL, relayBase+"/start?state=") {
 		t.Fatal("login should begin on CPA")
 	}
 	u, _ := url.Parse(start.URL)
 	resp, _ := p.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: "GET", Path: u.Path, Query: u.Query()})
-	if resp.StatusCode != 200 || !strings.Contains(string(resp.Body), "location.origin") || !strings.Contains(string(resp.Body), "8765/connect#") {
-		t.Fatal("missing automatic bootstrap")
+	if resp.StatusCode != 200 || !strings.Contains(string(resp.Body), `type="password"`) || !strings.Contains(string(resp.Body), "X-OAuth-Callback") {
+		t.Fatal("missing API key input page")
 	}
-	if strings.Contains(string(resp.Body), "127.0.0.1:8317") || strings.Contains(string(resp.Body), "management-key") {
+	if strings.Contains(string(resp.Body), "127.0.0.1:8317") || strings.Contains(string(resp.Body), "management-key") || strings.Contains(string(resp.Body), "8765") || strings.Contains(string(resp.Body), "__BOOTSTRAP__") {
 		t.Fatal("internal addresses or admin keys leaked")
 	}
 	if p.logins[start.State].ticket == start.State {
@@ -111,6 +111,52 @@ func TestRelayPublicURLAndRegistration(t *testing.T) {
 	for _, resource := range registration.Resources {
 		if resource.Handler == nil {
 			t.Fatal("missing handler")
+		}
+	}
+}
+
+func TestManualAPIKeyValidationAndIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		want       pluginapi.AuthLoginStatus
+	}{
+		{"valid", `{"data":{"user":{"id":"u2","email":"manual@example.test","name":"Manual User"}}}`, 200, pluginapi.AuthLoginStatusSuccess},
+		{"rejected", `{"error":"test-secret"}`, 401, pluginapi.AuthLoginStatusError},
+		{"missing_email", `{"user":{"id":"u2"}}`, 200, pluginapi.AuthLoginStatusError},
+		{"malformed_identity", `not json`, 200, pluginapi.AuthLoginStatusError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, start := newRelayTest(t)
+			raw, _ := json.Marshal(map[string]string{"state": start.State, "code": `{"apiKey":"test-secret"}`})
+			if resp := relayRequest(p, start, "submit", string(raw)); resp.StatusCode != 200 {
+				t.Fatal("API key alone must be accepted for validation")
+			}
+			got, err := p.PollLogin(context.Background(), pluginapi.AuthLoginPollRequest{State: start.State, Host: pluginapi.HostConfigSummary{AuthDir: t.TempDir()}, HTTPClient: fakeLoginHTTP{status: tc.status, body: tc.body}})
+			if err != nil || got.Status != tc.want {
+				t.Fatalf("unexpected result: %+v, %v", got, err)
+			}
+			if strings.Contains(got.Message, "test-secret") {
+				t.Fatal("error leaked API key")
+			}
+			if tc.want == pluginapi.AuthLoginStatusSuccess {
+				if got.Auth.FileName != "manual@example.test-commandcode-go.json" || got.Auth.Metadata["user_id"] != "u2" || got.Auth.Label != "Manual User" || got.Auth.Attributes["api_key"] != "test-secret" {
+					t.Fatalf("account identity or API key was not saved correctly: %s", got.Auth.FileName)
+				}
+			} else if len(got.Auth.StorageJSON) != 0 {
+				t.Fatal("invalid key must not produce saved credentials")
+			}
+		})
+	}
+}
+
+func TestManualAPIKeyRejectsUnsafeInput(t *testing.T) {
+	for _, key := range []string{"", "key\r\nInjected: value", "key with spaces", strings.Repeat("x", 4097), "密钥"} {
+		p, start := newRelayTest(t)
+		code, _ := json.Marshal(map[string]string{"apiKey": key})
+		raw, _ := json.Marshal(map[string]string{"state": start.State, "code": string(code)})
+		if resp := relayRequest(p, start, "submit", string(raw)); resp.StatusCode != 400 || p.logins[start.State].submitted {
+			t.Fatal("unsafe key accepted or consumed login session")
 		}
 	}
 }

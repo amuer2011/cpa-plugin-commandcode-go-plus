@@ -34,63 +34,37 @@ func (f fakeLoginHTTP) Do(_ context.Context, req pluginapi.HTTPRequest) (plugina
 func (f fakeLoginHTTP) DoStream(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
 	panic("unexpected stream")
 }
-func TestStartLoginBuildsSafeCallbackURL(t *testing.T) {
+func TestStartLoginBuildsManualAPIKeyPage(t *testing.T) {
 	p := &CommandCodeGoPlugin{}
-	got, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: "https://cpa.example.test/v0/management/oauth-callback"})
+	got, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.State == "" || len(got.State) < 40 || time.Until(got.ExpiresAt) <= 0 {
 		t.Fatal("invalid state or expiry")
 	}
-	login, err := url.Parse(p.logins[got.State].vendorURL)
-	if err != nil {
-		t.Fatal(err)
+	page, err := url.Parse(got.URL)
+	if err != nil || page.Path != relayBase+"/start" || page.Query().Get("state") != got.State {
+		t.Fatal("login must open the CPA API key page")
 	}
-	if login.Host != "commandcode.ai" || login.Path != "/studio/auth/cli" {
-		t.Fatal("unexpected login endpoint")
-	}
-	callback, err := url.Parse(login.Query().Get("callback"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if callback.Scheme != "http" || callback.Host != "127.0.0.1:8765" || callback.Path != "/callback" || callback.RawQuery != "" {
-		t.Fatal("invalid callback parameters")
-	}
-	if login.Query().Get("state") != got.State || login.Query().Get("mode") != "redirect" {
-		t.Fatal("invalid login parameters")
+	if strings.Contains(got.URL, "127.0.0.1") || strings.Contains(got.URL, "commandcode.ai") {
+		t.Fatal("login must not use a local callback or vendor OAuth")
 	}
 }
 
-func TestStartLoginBehindTLSProxy(t *testing.T) {
-	for _, baseURL := range []string{
-		"http://127.0.0.1:8317/v0/management/oauth-callback",
-		"http://[::1]:8317/v0/management/oauth-callback",
-		"http://localhost:8317/v0/management/oauth-callback",
+func TestStartLoginRejectsUnsafePublicOrigins(t *testing.T) {
+	for _, origin := range []string{
+		"http://cpa.example.test", "https://user:pass@cpa.example.test",
+		"https://cpa.example.test/wrong-path", "https://cpa.example.test?key=value",
+		"https://cpa.example.test#fragment",
 	} {
-		t.Run(baseURL, func(t *testing.T) {
-			p := &CommandCodeGoPlugin{}
-			got, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: baseURL})
-			if err != nil {
-				t.Fatal(err)
-			}
-			login, err := url.Parse(p.logins[got.State].vendorURL)
-			if err != nil || login.Query().Get("callback") != "http://127.0.0.1:8765/callback" {
-				t.Fatal("internal CPA address must not change the vendor callback")
-			}
-		})
-	}
-	for _, baseURL := range []string{
-		"http://cpa.example.test/v0/management/oauth-callback",
-		"https://cpa.example.test/wrong-path",
-		"https://user:pass@cpa.example.test/v0/management/oauth-callback",
-		"",
-	} {
-		if _, err := (&CommandCodeGoPlugin{}).StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: baseURL}); err == nil {
-			t.Errorf("unexpectedly accepted callback %q", baseURL)
+		_, p := Build([]byte("oauth_public_url: " + origin))
+		if _, err := p.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{}); err == nil {
+			t.Errorf("unexpectedly accepted public origin %q", origin)
 		}
 	}
 }
+
 func TestPollLoginConsumesAndValidatesCallback(t *testing.T) {
 	dir := t.TempDir()
 	state := "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"

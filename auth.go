@@ -6,9 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -59,29 +57,7 @@ func (p *CommandCodeGoPlugin) StartLogin(_ context.Context, req pluginapi.AuthLo
 		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("generate login state: %w", err)
 	}
 	state := base64.RawURLEncoding.EncodeToString(raw)
-	callback, err := url.Parse(req.BaseURL)
-	if err != nil || callback.Host == "" || callback.User != nil {
-		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("CommandCode login requires a valid CPA management callback URL")
-	}
-	// CPA supplies an internal loopback URL when TLS terminates at a reverse
-	// proxy. This URL is only validated here; it is not sent to CommandCode.
-	loopback := net.ParseIP(callback.Hostname())
-	if callback.Scheme != "https" && !(callback.Scheme == "http" && (callback.Hostname() == "localhost" || loopback != nil && loopback.IsLoopback())) {
-		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("CommandCode login requires HTTPS or an HTTP loopback management callback URL")
-	}
-	if callback.Path != "/v0/management/oauth-callback" {
-		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("CommandCode login requires the configured CPA management callback URL")
-	}
-	// Studio accepts only loopback callbacks. Keep the vendor callback fixed,
-	// independent of CPA's internal management URL.
-	callback = &url.URL{Scheme: "http", Host: "127.0.0.1:8765", Path: "/callback"}
-	login := url.URL{Scheme: "https", Host: "commandcode.ai", Path: "/studio/auth/cli"}
-	lq := login.Query()
-	lq.Set("callback", callback.String())
-	lq.Set("state", state)
-	lq.Set("mode", "redirect")
-	login.RawQuery = lq.Encode()
-	return p.startRelay(req, state, login.String())
+	return p.startRelay(req, state)
 }
 
 type commandCodeCredentials struct {
@@ -145,7 +121,7 @@ func (p *CommandCodeGoPlugin) pollLogin(ctx context.Context, req pluginapi.AuthL
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "CommandCode login was rejected"}, nil
 	}
 	var creds commandCodeCredentials
-	if err := json.Unmarshal([]byte(callback.Code), &creds); err != nil || creds.APIKey == "" || creds.UserID == "" || creds.UserName == "" || creds.KeyName == "" {
+	if err := json.Unmarshal([]byte(callback.Code), &creds); err != nil || !validAPIKey(creds.APIKey) {
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "Incomplete CommandCode credentials"}, nil
 	}
 	if req.HTTPClient == nil {
@@ -158,19 +134,36 @@ func (p *CommandCodeGoPlugin) pollLogin(ctx context.Context, req pluginapi.AuthL
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "CommandCode rejected the new API key"}, nil
 	}
-	// OAuth's userName can be a display name. The validated whoami response
-	// carries the account email (optionally wrapped in a data object).
+	// Resolve account identity from the validated API key, never from form input.
 	var identity struct {
 		User struct {
-			Email string `json:"email"`
+			Email    string `json:"email"`
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			UserName string `json:"userName"`
 		} `json:"user"`
 		Data struct {
 			User struct {
-				Email string `json:"email"`
+				Email    string `json:"email"`
+				ID       string `json:"id"`
+				Name     string `json:"name"`
+				UserName string `json:"userName"`
 			} `json:"user"`
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(resp.Body, &identity)
+	user := identity.Data.User
+	if user.Email == "" {
+		user = identity.User
+	}
+	if user.ID != "" {
+		creds.UserID = user.ID
+	}
+	if user.UserName != "" {
+		creds.UserName = user.UserName
+	} else if user.Name != "" {
+		creds.UserName = user.Name
+	}
 	email := strings.TrimSpace(identity.Data.User.Email)
 	if email == "" {
 		email = strings.TrimSpace(identity.User.Email)
@@ -186,6 +179,9 @@ func (p *CommandCodeGoPlugin) pollLogin(ctx context.Context, req pluginapi.AuthL
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "CommandCode did not provide a usable email address for the auth file"}, nil
 	}
 	label := creds.UserName
+	if label == "" {
+		label = email
+	}
 	if creds.KeyName != "" {
 		label += " (" + creds.KeyName + ")"
 	}

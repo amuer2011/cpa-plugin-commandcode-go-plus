@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,15 +18,32 @@ import (
 
 const relayBase = "/v0/resource/plugins/" + Provider + "/oauth"
 
-type relayLogin struct {
-	ticket, vendorURL string
-	expires           time.Time
-	payload           []byte
-	submitted         bool
-	status            string
+//go:embed assets/api-key-login.html
+var apiKeyLoginPage string
+
+// validAPIKey bounds input and excludes whitespace/control characters before it
+// can be used in an Authorization header. Keys are printable ASCII tokens.
+func validAPIKey(key string) bool {
+	if len(key) == 0 || len(key) > 4096 {
+		return false
+	}
+	for _, c := range key {
+		if c < 33 || c > 126 {
+			return false
+		}
+	}
+	return true
 }
 
-func (p *CommandCodeGoPlugin) startRelay(_ pluginapi.AuthLoginStartRequest, state, vendorURL string) (pluginapi.AuthLoginStartResponse, error) {
+type relayLogin struct {
+	ticket    string
+	expires   time.Time
+	payload   []byte
+	submitted bool
+	status    string
+}
+
+func (p *CommandCodeGoPlugin) startRelay(_ pluginapi.AuthLoginStartRequest, state string) (pluginapi.AuthLoginStartResponse, error) {
 	publicURL := ""
 	if p.cfg != nil {
 		publicURL = strings.TrimRight(p.cfg.OAuthPublicURL, "/")
@@ -51,7 +69,7 @@ func (p *CommandCodeGoPlugin) startRelay(_ pluginapi.AuthLoginStartRequest, stat
 			delete(p.logins, key)
 		}
 	}
-	p.logins[state] = &relayLogin{ticket: base64.RawURLEncoding.EncodeToString(raw), vendorURL: vendorURL, expires: expires, status: "wait"}
+	p.logins[state] = &relayLogin{ticket: base64.RawURLEncoding.EncodeToString(raw), expires: expires, status: "wait"}
 	return pluginapi.AuthLoginStartResponse{Provider: Provider, State: state, ExpiresAt: expires, URL: publicURL + relayBase + "/start?state=" + url.QueryEscape(state)}, nil
 }
 
@@ -89,14 +107,12 @@ func (p *CommandCodeGoPlugin) HandleManagement(_ context.Context, req pluginapi.
 		if session.submitted {
 			return relayJSON(409, "received"), nil
 		}
-		bootstrap, _ := json.Marshal(map[string]string{"state": state, "ticket": session.ticket, "login": session.vendorURL})
-		// The browser knows the public CPA origin even when the host only
-		// supplies an internal loopback BaseURL. No management key is transferred.
-		body := `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>CommandCode 登录</title><p>正在接续 CPA 授权。请保持原 CPA 管理页打开。</p><p>请先在浏览器所在电脑启动回调助手。<a id="retry">继续授权</a></p><script>const b=` + string(bootstrap) + `;b.cpa=location.origin;const target="http://127.0.0.1:8765/connect#"+encodeURIComponent(JSON.stringify(b));document.getElementById("retry").href=target;location.replace(target);</script></html>`
+		bootstrap, _ := json.Marshal(map[string]string{"state": state, "ticket": session.ticket})
+		body := strings.Replace(apiKeyLoginPage, "__BOOTSTRAP__", string(bootstrap), 1)
 		return pluginapi.ManagementResponse{StatusCode: 200, Headers: http.Header{
 			"Content-Type": {"text/html; charset=utf-8"}, "Cache-Control": {"no-store"},
 			"Referrer-Policy": {"no-referrer"}, "X-Frame-Options": {"DENY"},
-			"Content-Security-Policy": {"default-src 'none'; script-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"},
+			"Content-Security-Policy": {"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"},
 		}, Body: []byte(body)}, nil
 	}
 	if subtle.ConstantTimeCompare([]byte(session.ticket), []byte(req.Headers.Get("X-OAuth-Ticket"))) != 1 {
@@ -125,7 +141,7 @@ func (p *CommandCodeGoPlugin) HandleManagement(_ context.Context, req pluginapi.
 		}
 		if callback.Error == "" {
 			var credentials commandCodeCredentials
-			if json.Unmarshal([]byte(callback.Code), &credentials) != nil || credentials.APIKey == "" || credentials.UserID == "" || credentials.UserName == "" || credentials.KeyName == "" {
+			if json.Unmarshal([]byte(callback.Code), &credentials) != nil || !validAPIKey(credentials.APIKey) {
 				return relayJSON(400, "error"), nil
 			}
 		}

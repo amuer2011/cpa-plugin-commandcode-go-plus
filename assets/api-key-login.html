@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CommandCode API Key</title>
+<style>
+body{font:16px system-ui;max-width:560px;margin:8vh auto;padding:24px;line-height:1.7;color:#18212f;background:#f8fafc}
+label{display:block;font-weight:600}input,button{box-sizing:border-box;font:inherit;padding:12px;border-radius:8px;margin-top:10px}input{width:100%;border:1px solid #94a3b8}button{border:0;background:#2563eb;color:white;cursor:pointer}button:disabled{opacity:.5;cursor:default}#message{white-space:pre-wrap}
+</style>
+<h1>添加 CommandCode 账号</h1>
+<p>输入你自己的 CommandCode API Key。CPA 将验证密钥并保存账号，请保持原 CPA 管理页打开。</p>
+<p>请使用 CommandCode 账号的 API Key，不要输入 CPA 管理密钥。</p>
+<form id="login" autocomplete="off">
+<label for="key">CommandCode API Key</label>
+<input id="key" type="password" required maxlength="4096" autocomplete="off" spellcheck="false" placeholder="粘贴 API Key">
+<button id="submit" type="submit" disabled>验证并保存</button>
+</form>
+<p id="message" role="status" aria-live="polite"></p>
+<noscript>请启用 JavaScript 后重新打开此页面。</noscript>
+<script>
+const session=__BOOTSTRAP__;
+const form=document.getElementById("login"),key=document.getElementById("key"),button=document.getElementById("submit"),message=document.getElementById("message");
+button.disabled=false;
+async function call(action,payload){
+  const headers={"X-OAuth-State":session.state,"X-OAuth-Ticket":session.ticket,"Accept":"application/json"};
+  if(payload){
+    const bytes=new TextEncoder().encode(JSON.stringify(payload));
+    headers["X-OAuth-Callback"]=btoa(String.fromCharCode(...bytes)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+  }
+  const response=await fetch("./"+action,{headers,cache:"no-store",credentials:"omit",redirect:"error",referrerPolicy:"no-referrer"});
+  if(response.status===409||response.status===410)throw Error("本次登录已完成或过期，请从 CPA 管理页重新发起登录。");
+  if(!response.ok)throw Error("CPA 未能接收请求（HTTP "+response.status+"），请检查网络或从管理页重新登录。");
+  return response.json();
+}
+form.addEventListener("submit",async(event)=>{
+  event.preventDefault();
+  const apiKey=key.value.trim();
+  if(!apiKey||apiKey.length>4096||/[^\x21-\x7e]/.test(apiKey)){
+    message.textContent="请输入有效的 API Key，密钥中不能包含空格或换行。";
+    return;
+  }
+  button.disabled=true;key.disabled=true;
+  message.textContent="正在提交，请保持原 CPA 管理页打开，等待验证和保存。";
+  try{
+    const result=await call("submit",{state:session.state,code:JSON.stringify({apiKey})});
+    if(result.status!=="received")throw Error("CPA 未接收密钥，请重新发起登录。");
+    key.value="";
+  }catch(error){
+    message.textContent=error.message||"提交失败，请检查网络后重试。";
+    button.disabled=false;key.disabled=false;
+    return;
+  }
+  for(;;){
+    await new Promise(resolve=>setTimeout(resolve,2000));
+    try{
+      const result=await call("check");
+      if(result.status==="validated"){
+        message.textContent="API Key 验证通过。请回到原 CPA 管理页确认账号保存结果，然后关闭此页。";
+        form.hidden=true;return;
+      }
+      if(result.status==="error"){
+        message.textContent="密钥验证失败，请查看原 CPA 管理页的错误提示，并重新发起登录。";
+        form.hidden=true;return;
+      }
+      message.textContent="密钥已提交，正在等待 CPA 验证。请保持原 CPA 管理页打开，等待账号保存完成。";
+    }catch(error){
+      message.textContent=error.message||"查询失败，请回到原 CPA 管理页查看结果。";
+      return;
+    }
+  }
+});
+</script>
+</html>

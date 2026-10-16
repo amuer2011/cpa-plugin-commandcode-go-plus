@@ -2,7 +2,7 @@
 
 ## 中文
 
-本插件将 CommandCode Go 订阅接入 CLIProxyAPI（CPA），可通过 CPA 使用模型、管理 OAuth 账号并查看配额。
+本插件将 CommandCode Go 订阅接入 CLIProxyAPI（CPA），可通过 CPA 使用模型、管理账号并查看配额。
 
 **使用方法**
 1. 从 [GitHub Releases](https://github.com/amuer2011/cpa-plugin-commandcode-go-plus/releases) 下载与 CPA 容器架构匹配的插件（`amd64` 或 `arm64`）。
@@ -20,7 +20,7 @@
          auth_files: true
    ```
 
-4. 在浏览器所在电脑使用 Python 3 运行 [commandcode-oauth-bridge.py](scripts/commandcode-oauth-bridge.py)（也可从 Release 下载该原文件），然后在 CPA 管理页点击 CommandCode 登录。助手自动接续本次会话并提交授权回调，无需再次输入地址或管理密钥。授权期间保持助手和原 CPA 管理页打开，等待 CPA 保存账号。
+4. 在 CPA 管理页点击 CommandCode 登录（按钮可能仍位于 OAuth 区域），在 CPA 自己托管的 API Key 输入页粘贴来自自己 CommandCode 账号的有效 API Key 并提交。请保持原 CPA 管理页打开，等待 CPA 校验并保存账号。无需本地服务、Python 或回调助手。
 5. 使用模型名 `commandcode-go/<模型名>` 发送请求，例如 `commandcode-go/deepseek-v4.1-flash`。配额可在 CPA 配额页面查看。
 <img width="2774" height="956" alt="2" src="https://github.com/user-attachments/assets/1c7e7762-8d67-4308-925d-64e9366e5180" />
 <img width="1564" height="1150" alt="1" src="https://github.com/user-attachments/assets/a7ec5985-0314-422a-a461-afeda6c233cf" />
@@ -35,25 +35,21 @@
 
 总 token 数沿用上游 `inputTokens` / `outputTokens`，不重复累加缓存明细。上游未返回的明细字段不补造；sub2api 是否展示缓存创建取决于其版本是否读取对应扩展字段。
 
-## 远程 CPA 的 OAuth 回调
+## 手动 API Key 登录
 
-CommandCode 只允许 localhost 回调，并在 `mode=redirect` 下通过表单 POST 发送凭据。浏览器访问的 `127.0.0.1` 是用户电脑，服务器上的插件无法接收这个请求。仅安装 `.so` 后直接点击 OAuth 登录，若本机没有回调服务，授权完成后就会出现 `ERR_CONNECTION_REFUSED`。
+CPA 管理页中的 CommandCode 登录按钮（可能仍位于 OAuth 区域）会打开由 CPA 自己托管的 API Key 输入页。请从自己的 CommandCode 账号获取有效 API Key，在该页手动粘贴并提交；不能用 CPA 管理密钥代替 CommandCode API Key。
 
-本地助手使用 Python 3 标准库，无需安装依赖：
+- 输入页通过一次性 state/ticket 绑定当前会话，30 分钟到期，凭证只能提交一次。
+- CPA 服务器用提交的 API Key 调用 `https://api.commandcode.ai/alpha/whoami` 校验并取得账号邮箱，随后按 `邮箱-commandcode-go.json` 保存认证文件。
+- 请保持原 CPA 管理页打开：认证文件由该页面的登录状态轮询保存。
+- 凭据只经同源请求头传输，不进入 URL。
+- 全程不需要本地服务、Python 或回调助手，不会自动跳转上游授权，也不会自动获取凭据。
 
-```bash
-python commandcode-oauth-bridge.py
-```
-
-保持助手运行，在 CPA 管理页点击 CommandCode 登录即可。流程为：CPA → 自动连接本地助手 → CommandCode 授权 → 助手接收回调 → CPA 验证并保存。原 CPA 管理页需保持打开，因为 CPA 在该页面的登录状态轮询中保存认证文件。
-
-插件为每次登录生成独立的临时回调凭证，绑定 state，30 分钟过期，只能提交一次回调。助手不会读取或接收管理密钥，也没有管理地址或密钥输入框。临时凭证通过 URL fragment 传给本地助手，API key 和回调凭证通过 HTTPS 请求头提交，不进入请求 URL、页面或普通访问日志。CPA 管理接口的认证保持原样。
-
-助手只监听 `127.0.0.1:8765`。nginx 须将 `/v0/resource/plugins/commandcode-go/oauth/` 转发给 CPA；现有白名单也必须允许浏览器所在电脑访问。默认自动使用 CPA 管理页的域名；若管理前端位于不同域名，可在插件配置中设置 `oauth_public_url: https://你的CPA域名`。更新插件时也请更新并重启助手。助手显示“授权验证完成”后，以 CPA 管理页的账号保存结果为准。
+现有 SDK 资源路由只有 GET，插件内部保留 `/v0/resource/plugins/commandcode-go/oauth/` 路径以兼容 nginx 配置；nginx 仍须将该路径反代给 CPA，现有白名单同样适用。默认自动使用 CPA 管理页的域名；若管理前端与后端位于不同域名，可在插件配置中设置 `oauth_public_url: https://你的CPA域名`，指定 CPA 的 HTTPS origin。
 
 ## English
 
-This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowing you to use models, manage OAuth accounts, and view quota through CPA.
+This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowing you to use models, manage accounts, and view quota through CPA.
 
 **Usage**
 1. Download the plugin matching your CPA container architecture (`amd64` or `arm64`) from [GitHub Releases](https://github.com/amuer2011/cpa-plugin-commandcode-go-plus/releases).
@@ -71,5 +67,17 @@ This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowin
          auth_files: true
    ```
 
-4. Run [commandcode-oauth-bridge.py](scripts/commandcode-oauth-bridge.py) with Python 3 on the computer running your browser (also available as a raw Release asset). Start login from the CPA management page. The helper automatically connects using a temporary session ticket and never asks for or receives your management key. Keep both the helper and the original CPA page open until CPA verifies and saves the account. Update both the plugin and helper together.
+4. Click CommandCode login on the CPA management page (the button may still sit in the OAuth area), then paste a valid API Key from your own CommandCode account into the CPA-hosted API Key input page and submit it. Keep the original CPA management page open while CPA verifies the key and saves the account. No local service, Python, or callback helper is required.
 5. Send requests using `commandcode-go/<model-name>`, for example `commandcode-go/deepseek-v4.1-flash`. View quota on CPA's quota page.
+
+## Manual API Key login
+
+The CommandCode login button on the CPA management page (which may still sit in the OAuth area) opens an API Key input page hosted by CPA itself. Obtain a valid API Key from your own CommandCode account, paste it into that page, and submit. A CPA management key cannot be used in place of a CommandCode API Key.
+
+- The input page is bound to the session through a one-time state/ticket, expires after 30 minutes, and accepts credentials only once.
+- The CPA server verifies the submitted API Key against `https://api.commandcode.ai/alpha/whoami` and reads the account email, then saves the auth file as `email-commandcode-go.json`.
+- Keep the original CPA management page open: its login status polling saves the auth file.
+- Credentials travel only in same-origin request headers and never appear in the URL.
+- No local service, Python, or callback helper is required, and there is no automatic redirect to or automatic completion of upstream authorization.
+
+The pinned SDK exposes only GET resource routes, so the plugin keeps the `/v0/resource/plugins/commandcode-go/oauth/` path internally for nginx compatibility; nginx must still reverse-proxy that path to CPA, and the existing whitelist still applies. By default the CPA management page's domain is used automatically; if the management frontend and backend are on different domains, set `oauth_public_url: https://your-cpa-domain` in the plugin config to specify the CPA HTTPS origin.
