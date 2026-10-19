@@ -25,6 +25,19 @@
 <img width="2774" height="956" alt="2" src="https://github.com/user-attachments/assets/1c7e7762-8d67-4308-925d-64e9366e5180" />
 <img width="1564" height="1150" alt="1" src="https://github.com/user-attachments/assets/a7ec5985-0314-422a-a461-afeda6c233cf" />
 
+## 模型目录
+
+模型列表不再写死在代码里，默认从 `GET https://api.commandcode.ai/provider/v1/models` 拉取（10 分钟缓存）；插件启动时先用构建期快照 [`assets/models-snapshot.json`](assets/models-snapshot.json) 兜底，该文件可用同一条接口的返回重新生成。
+
+- 模型 ID 为 `commandcode-go/<上游短名>`，例如 `commandcode-go/deepseek-v4.1-flash-fast`；也接受完整上游名 `commandcode-go/deepseek/deepseek-v4.1-flash-fast`，大小写不敏感，`(high)` 这类推理后缀会被忽略。
+- **按账号套餐过滤**：`ModelsForAuth` 用该账号的 API Key 读取 `/alpha/whoami`、`/alpha/billing/subscriptions`、`/alpha/billing/credits`（5 分钟缓存），只列出当前套餐能跑的模型。有按量余额（`purchasedCredits + freeCredits > 0`）时不过滤；查不到套餐时也不过滤（fail-open），不会因计费接口抖动把列表清空。
+- 套餐档位映射在 [`assets/model-tiers.json`](assets/model-tiers.json)（模型 → 最低套餐），与官方 plan 页面同步；`/provider/v1/models` 本身不带套餐信息，所以这份数据必须随版本更新。
+- 网关缺后端或地区受限的模型记在 `assets/model-tiers.json` 的 `unavailable` 里：列表不展示，但仍可显式调用（会拿到上游错误）。2026-10-19 用 Go 账号逐条实测，当前 9 条。
+- 可选项：
+  - `models:` 显式白名单，写了就覆盖目录（旧的 `alias`/`name` 形式继续可用）；
+  - `models_tier: go`（或 `goat`/`pro`/`provider`/`max`/`all`）限制 CPA 全局模型页展示的上限，默认 `all`；
+  - `disable_plan_filter: true` 关闭按账号的套餐过滤。
+
 ## 缓存用量统计
 
 流式和非流式响应均保留上游 `totalUsage.inputTokenDetails`：
@@ -69,6 +82,16 @@ This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowin
 
 4. Click CommandCode login on the CPA management page (the button may still sit in the OAuth area), then paste a valid API Key from your own CommandCode account into the CPA-hosted API Key input page and submit it. Keep the original CPA management page open while CPA verifies the key and saves the account. No local service, Python, or callback helper is required.
 5. Send requests using `commandcode-go/<model-name>`, for example `commandcode-go/deepseek-v4.1-flash`. View quota on CPA's quota page.
+
+## Model catalog
+
+The model list is no longer hard-coded: it comes from `GET https://api.commandcode.ai/provider/v1/models` (10-minute cache). At startup the plugin falls back to the build-time snapshot in [`assets/models-snapshot.json`](assets/models-snapshot.json), which can be regenerated from the same endpoint.
+
+- Model IDs are `commandcode-go/<upstream short name>`, e.g. `commandcode-go/deepseek-v4.1-flash-fast`. The full upstream name (`commandcode-go/deepseek/deepseek-v4.1-flash-fast`) is accepted too; matching is case-insensitive and drops reasoning suffixes such as `(high)`.
+- **Plan filtering**: `ModelsForAuth` reads `/alpha/whoami`, `/alpha/billing/subscriptions` and `/alpha/billing/credits` with the credential's key (5-minute cache) and lists only the models the current plan serves. On-demand credit (`purchasedCredits + freeCredits > 0`) disables filtering, and an unknown plan fails open, so a billing hiccup never blanks the list.
+- Plan tiers live in [`assets/model-tiers.json`](assets/model-tiers.json) (model → minimum plan), synced with the official plan pages. `/provider/v1/models` carries no plan data, so this file must ship with each release.
+- Models the vendor's backend refuses (missing backend, regional restriction) are listed under `unavailable` in `assets/model-tiers.json`: hidden from the picker but still routable. Probed one by one with a Go key on 2026-10-19; nine entries today.
+- Optional knobs: `models:` is an explicit allowlist that overrides the catalog (the old `alias`/`name` form still works); `models_tier: go` (or `goat`/`pro`/`provider`/`max`/`all`) caps the global CPA model page; `disable_plan_filter: true` turns per-account filtering off.
 
 ## Manual API Key login
 

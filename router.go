@@ -17,15 +17,11 @@ type Router struct {
 func NewRouter(cfg *pluginConfig) *Router { return &Router{cfg: cfg} }
 
 func (r *Router) owned(req pluginapi.ModelRouteRequest) bool {
-	set := r.cfg.claimed
-	if set == nil {
-		return false
-	}
 	for _, candidate := range []string{req.RequestedModel, modelFromBody(req.Body)} {
 		if candidate == "" {
 			continue
 		}
-		if _, ok := set[normalizeModel(candidate)]; ok {
+		if _, ok := r.cfg.lookup(candidate); ok {
 			return true
 		}
 	}
@@ -39,7 +35,7 @@ func (r *Router) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest
 		return pluginapi.ModelRouteResponse{}, nil
 	}
 	if r.cfg.AuthFiles {
-		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetProvider, Target: Provider, TargetModel: Provider + "/" + normalizeModel(routeModel(req)), Reason: "CommandCode Go managed credential"}, nil
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetProvider, Target: Provider, TargetModel: Provider + "/" + r.cfg.aliasFor(routeModel(req)), Reason: "CommandCode Go managed credential"}, nil
 	}
 	return pluginapi.ModelRouteResponse{
 		Handled:    true,

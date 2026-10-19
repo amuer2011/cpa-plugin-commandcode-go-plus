@@ -45,6 +45,11 @@ func upstreamHeaders(apiKey string) http.Header {
 func (e *Executor) buildBody(model string, payload []byte) ([]byte, error) {
 	upstream := strings.TrimSpace(e.cfg.upstreamName(model))
 	if upstream == "" {
+		// Unknown model: still strip the plugin namespace so the vendor sees a
+		// name it can recognise (or reject clearly) instead of "commandcode-go/x".
+		upstream = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(model), Provider+"/"))
+	}
+	if upstream == "" {
 		upstream = model
 	}
 	return buildGenerateBody(upstream, payload)

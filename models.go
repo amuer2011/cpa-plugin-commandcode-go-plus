@@ -2,68 +2,136 @@ package plugin
 
 import (
 	"context"
-	"strings"
+	"crypto/sha256"
+	"encoding/hex"
+	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// ModelProvider contributes the commandcode-go model list to the host
-// registry. StaticModels has no HTTPClient, so the list is derived from the
-// same configuration that drives routing, keeping the two in step.
+// billingTTL bounds how often one credential's plan is re-read. Plans change on
+// billing events, not per request, and model discovery runs on every panel open.
+const billingTTL = 5 * time.Minute
+
+// ModelProvider contributes the commandcode-go model list to the host registry.
+//
+// StaticModels is served from the embedded/cached catalog snapshot because the
+// host hands it no HTTP client. ModelsForAuth does have one, so it refreshes the
+// live catalog and filters it by the credential's subscription tier.
 type ModelProvider struct {
 	cfg *pluginConfig
+
+	mu      sync.Mutex
+	billing map[string]billingRecord
 }
 
-func NewModelProvider(cfg *pluginConfig) *ModelProvider { return &ModelProvider{cfg: cfg} }
-
-// modelDef is the registry-facing shape of one claimed model.
-type modelDef struct {
-	id          string
-	displayName string
+type billingRecord struct {
+	access accountAccess
+	at     time.Time
 }
 
-// registryModels builds the advertised list from configuration. IDs use the
-// commandcode-go namespace deliberately: the host skips plugin models that
-// any native executor already serves, so reusing bare vendor names could
-// leave this executor permanently unregistered.
-func (p *ModelProvider) registryModels() []modelDef {
-	defs := make([]modelDef, 0, len(p.cfg.effectiveModels()))
-	for _, entry := range p.cfg.effectiveModels() {
-		name := strings.TrimSpace(entry.Alias)
-		if name == "" {
-			name = strings.TrimSpace(entry.Name)
-		}
-		if name == "" {
-			continue
-		}
-		defs = append(defs, modelDef{
-			id:          Provider + "/" + name,
-			displayName: entry.label() + " via CommandCode Go",
-		})
-	}
-	return defs
+func NewModelProvider(cfg *pluginConfig) *ModelProvider {
+	return &ModelProvider{cfg: cfg, billing: make(map[string]billingRecord)}
 }
 
 func (p *ModelProvider) StaticModels(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
-	return pluginapi.ModelResponse{Provider: Provider, Models: p.models()}, nil
+	index := p.cfg.modelIndex()
+	if index == nil {
+		return modelResponse(nil), nil
+	}
+	entries := advertised(index.entries)
+	if maxWeight, ok := p.cfg.staticTierWeight(); ok {
+		entries = filterByTier(entries, maxWeight)
+	}
+	return modelResponse(entries), nil
 }
 
-func (p *ModelProvider) ModelsForAuth(context.Context, pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
-	return pluginapi.ModelResponse{Provider: Provider, Models: p.models()}, nil
+func (p *ModelProvider) ModelsForAuth(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+	key := credentialKey(req.StorageJSON, req.Metadata, req.Attributes)
+	if key == "" && !p.cfg.AuthFiles {
+		// Self-routed mode: the operator's configured key is the account.
+		key = p.cfg.firstKey()
+	}
+	index := p.cfg.modelIndex()
+	if p.cfg.catalogEnabled() && req.HTTPClient != nil {
+		index = p.cfg.refreshCatalog(ctx, req.HTTPClient, key)
+	}
+	if index == nil {
+		return modelResponse(nil), nil
+	}
+	entries := advertised(index.entries)
+	if p.cfg.planFilterEnabled() && p.cfg.catalogEnabled() {
+		if access, ok := p.accountAccess(ctx, req, key); ok {
+			entries = filterByAccess(entries, access)
+		}
+	}
+	return modelResponse(entries), nil
 }
 
-func (p *ModelProvider) models() []pluginapi.ModelInfo {
-	defs := p.registryModels()
-	models := make([]pluginapi.ModelInfo, 0, len(defs))
-	for _, def := range defs {
+// advertised drops catalog entries the vendor's backend cannot serve. They stay
+// routable (an explicit request still reaches the executor) but never show up in
+// a model list.
+func advertised(entries []modelEntry) []modelEntry {
+	out := make([]modelEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Available {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// accountAccess resolves (and caches) the subscription tier behind one key.
+func (p *ModelProvider) accountAccess(ctx context.Context, req pluginapi.AuthModelRequest, key string) (accountAccess, bool) {
+	if req.HTTPClient == nil || key == "" {
+		return accountAccess{}, false
+	}
+	cacheKey := credentialCacheKey(key)
+	p.mu.Lock()
+	record, hit := p.billing[cacheKey]
+	p.mu.Unlock()
+	if hit && time.Since(record.at) < billingTTL {
+		return record.access, record.access.known || record.access.onDemand
+	}
+	access, ok := fetchAccountAccess(ctx, req.HTTPClient, p.cfg.baseURL(), key)
+	if !ok {
+		return accountAccess{}, false
+	}
+	p.mu.Lock()
+	p.billing[cacheKey] = billingRecord{access: access, at: time.Now()}
+	p.mu.Unlock()
+	return access, true
+}
+
+// credentialCacheKey keeps plan facts off the raw credential: the map lives in
+// memory for the plugin's lifetime, but hashing costs nothing.
+func credentialCacheKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+// modelResponse turns catalogue entries into registry models. IDs use the
+// commandcode-go namespace deliberately: the host skips plugin models that any
+// native executor already serves, so reusing bare vendor names could leave this
+// executor permanently unregistered.
+func modelResponse(entries []modelEntry) pluginapi.ModelResponse {
+	models := make([]pluginapi.ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		id := Provider + "/" + entry.Alias
+		display := entry.Display
+		if display == "" {
+			display = entry.Upstream
+		}
 		models = append(models, pluginapi.ModelInfo{
-			ID:                         def.id,
+			ID:                         id,
 			Object:                     "model",
 			OwnedBy:                    Provider,
 			Type:                       "chat",
-			DisplayName:                def.displayName,
-			Name:                       def.id,
-			Description:                def.displayName,
+			DisplayName:                display + " via CommandCode Go",
+			Name:                       id,
+			Description:                entry.Upstream + " via CommandCode Go",
+			InputTokenLimit:            entry.Context,
 			SupportedGenerationMethods: []string{"chatCompletions"},
 			SupportedInputModalities:   []string{"text"},
 			SupportedOutputModalities:  []string{"text"},
@@ -74,5 +142,5 @@ func (p *ModelProvider) models() []pluginapi.ModelInfo {
 			},
 		})
 	}
-	return models
+	return pluginapi.ModelResponse{Provider: Provider, Models: models}
 }

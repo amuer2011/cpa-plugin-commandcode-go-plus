@@ -1,9 +1,14 @@
 package plugin
 
 import (
+	"context"
 	"strings"
+	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // pluginConfig mirrors the plugins.configs.<id> mapping the host hands us
@@ -27,13 +32,27 @@ type pluginConfig struct {
 	// Optional when the management frontend is hosted on a different origin.
 	OAuthPublicURL string `yaml:"oauth_public_url"`
 
-	// Models declares which models this plugin claims. Entries are structured
-	// ("- alias: x / name: y") or bare strings ("- y", alias == name).
+	// Models is an optional explicit override. When present it replaces the
+	// live catalog: entries pair a client-facing alias with the exact vendor
+	// name. When absent (the default) the model list comes from
+	// GET /provider/v1/models, so new vendor models appear without a release.
 	Models []ModelEntry `yaml:"models"`
 
-	// Derived from Models at parse time. Not YAML fields.
-	claimed  map[string]struct{}
-	rewrites map[string]string
+	// ModelsTier caps the models advertised through StaticModels (the global
+	// model page, which has no credential context): "", "all", or one of
+	// go|goat|pro|provider|max. Empty means no cap.
+	ModelsTier string `yaml:"models_tier"`
+
+	// DisablePlanFilter turns off per-credential subscription filtering in
+	// ModelsForAuth, so every catalog model is listed regardless of plan.
+	DisablePlanFilter bool `yaml:"disable_plan_filter"`
+
+	// index is the live model snapshot. It starts as the embedded catalog and
+	// is replaced wholesale after a successful refresh, so readers always see
+	// a consistent map without locking per lookup.
+	indexMu   sync.RWMutex
+	index     *modelIndex
+	refreshMu sync.Mutex
 }
 
 // ModelEntry maps a client-facing alias to the name the vendor serves.
@@ -41,9 +60,9 @@ type pluginConfig struct {
 //	name  — the model name sent upstream ("deepseek/deepseek-v4.1-flash")
 //	alias — the name clients request ("deepseek-v4.1-flash")
 //
-// The mapping is REQUIRED: this executor talks to /alpha/generate with its
-// own base URL, so the host's alias table never applies, and the gateway
-// rejects a bare alias ("deepseek-v4.1-flash is not recognized").
+// The mapping is REQUIRED for overrides: this executor talks to /alpha/generate
+// with its own base URL, so the host's alias table never applies, and the
+// gateway rejects a bare alias ("deepseek-v4.1-flash is not recognized").
 type ModelEntry struct {
 	Alias       string `yaml:"alias"`
 	Name        string `yaml:"name"`
@@ -77,90 +96,115 @@ func (m ModelEntry) label() string {
 	return strings.TrimSpace(m.Alias)
 }
 
-// defaultModelEntries: every entry verified live (HTTP 200 on
-// /alpha/generate) against a Go plan key on 2026-09-12. Open-weight models
-// the Go plan covers; minimax/qwen/longcat ids were rejected ("Model/provider
-// not recognized") and are left out. Override via config when the vendor
-// renames or adds models.
-func defaultModelEntries() []ModelEntry {
-	return []ModelEntry{
-		{Alias: "deepseek-v4.1-flash", Name: "deepseek/deepseek-v4.1-flash"},
-		{Alias: "deepseek-v4-flash", Name: "deepseek/deepseek-v4-flash"},
-		{Alias: "deepseek-v4-flash-fast", Name: "deepseek/deepseek-v4-flash-fast"},
-		{Alias: "deepseek-v4-flash-vision-exp", Name: "deepseek/deepseek-v4-flash-vision-exp"},
-		{Alias: "glm-5.3-flash", Name: "z-ai/glm-5.3-flash"},
-		{Alias: "glm-5.3", Name: "zai-org/GLM-5.3"},
-		{Alias: "kimi-k3", Name: "moonshotai/Kimi-K3"},
-		{Alias: "kimi-k2.7-code", Name: "moonshotai/Kimi-K2.7-Code"},
-		{Alias: "kimi-k2.6", Name: "moonshotai/Kimi-K2.6"},
-	}
-}
-
 func parseConfig(raw []byte) *pluginConfig {
 	cfg := &pluginConfig{}
 	if len(raw) > 0 {
 		_ = yaml.Unmarshal(raw, cfg)
 	}
-	cfg.buildIndexes()
+	cfg.index = cfg.initialIndex()
 	return cfg
 }
 
-// effectiveModels returns the configured entries, or the built-in defaults
-// when configuration declares none.
-func (c *pluginConfig) effectiveModels() []ModelEntry {
+// initialIndex seeds the snapshot: the operator's explicit list when one is
+// configured, otherwise the catalog embedded at build time. A live refresh
+// replaces the latter on the first ModelsForAuth call.
+func (c *pluginConfig) initialIndex() *modelIndex {
 	if c != nil && len(c.Models) > 0 {
-		return c.Models
+		return newModelIndex(entriesFromConfig(c.Models), time.Time{})
 	}
-	return defaultModelEntries()
+	return newModelIndex(entriesFromCatalog(embeddedCatalog()), time.Time{})
 }
 
-// buildIndexes derives the lookup tables once per configuration. Keys are
-// built with normalizeModel (so "commandcode-go/deepseek-v4.1-flash",
-// "deepseek/deepseek-v4.1-flash" and "deepseek-v4.1-flash" all match one
-// entry); values are the operator's literal Name — the vendor's identifier
-// must never be normalized or the gateway would reject it.
-func (c *pluginConfig) buildIndexes() {
-	entries := c.effectiveModels()
-	c.claimed = make(map[string]struct{}, len(entries)*2)
-	c.rewrites = make(map[string]string, len(entries)*2)
-	for _, entry := range entries {
-		alias := normalizeModel(entry.Alias)
-		name := strings.TrimSpace(entry.Name)
-		if alias == "" && name == "" {
-			continue
-		}
-		if alias != "" {
-			c.claimed[alias] = struct{}{}
-		}
-		if name == "" {
-			continue
-		}
-		if normalizedName := normalizeModel(name); normalizedName != "" {
-			c.claimed[normalizedName] = struct{}{}
-		}
-		target := name
-		if alias == "" {
-			// Bare upstream form: alias and name are one.
-			target = name
-			if a := normalizeModel(name); a != "" {
-				c.rewrites[a] = name
-			}
-			continue
-		}
-		c.rewrites[alias] = target
-		if normalizedName := normalizeModel(name); normalizedName != "" {
-			c.rewrites[normalizedName] = target
-		}
+// catalogEnabled reports whether the model list should track the vendor.
+func (c *pluginConfig) catalogEnabled() bool {
+	return c != nil && len(c.Models) == 0
+}
+
+// planFilterEnabled reports whether per-credential tier filtering applies.
+func (c *pluginConfig) planFilterEnabled() bool {
+	return c == nil || !c.DisablePlanFilter
+}
+
+// staticTierWeight resolves the models_tier cap for StaticModels.
+func (c *pluginConfig) staticTierWeight() (int, bool) {
+	if c == nil {
+		return 0, false
 	}
+	switch name := strings.ToLower(strings.TrimSpace(c.ModelsTier)); name {
+	case "", "all":
+		return 0, false
+	default:
+		return tierWeight(name)
+	}
+}
+
+// modelIndex returns the current immutable snapshot.
+func (c *pluginConfig) modelIndex() *modelIndex {
+	if c == nil {
+		return nil
+	}
+	c.indexMu.RLock()
+	defer c.indexMu.RUnlock()
+	return c.index
+}
+
+// setModelIndex swaps in a freshly built snapshot.
+func (c *pluginConfig) setModelIndex(index *modelIndex) {
+	if c == nil || index == nil {
+		return
+	}
+	c.indexMu.Lock()
+	c.index = index
+	c.indexMu.Unlock()
+}
+
+// refreshCatalog pulls the live model list when the snapshot is older than
+// catalogTTL. Failures keep the previous snapshot: a vendor outage must not
+// blank the model list.
+func (c *pluginConfig) refreshCatalog(ctx context.Context, client pluginapi.HostHTTPClient, apiKey string) *modelIndex {
+	if c == nil || !c.catalogEnabled() || client == nil {
+		return c.modelIndex()
+	}
+	current := c.modelIndex()
+	if current != nil && !current.fetched.IsZero() && time.Since(current.fetched) < catalogTTL {
+		return current
+	}
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	// Another caller may have refreshed while we waited for the lock.
+	if current = c.modelIndex(); current != nil && !current.fetched.IsZero() && time.Since(current.fetched) < catalogTTL {
+		return current
+	}
+	models, err := fetchCatalog(ctx, client, c.baseURL(), apiKey)
+	if err != nil {
+		return c.modelIndex()
+	}
+	index := newModelIndex(entriesFromCatalog(models), time.Now())
+	c.setModelIndex(index)
+	return index
+}
+
+// lookup resolves a client-requested model through the current snapshot.
+func (c *pluginConfig) lookup(model string) (modelEntry, bool) {
+	return c.modelIndex().lookup(model)
 }
 
 // upstreamName returns the vendor's model name for a client-requested model.
 // An empty result means "forward the client's name verbatim".
 func (c *pluginConfig) upstreamName(model string) string {
-	if c == nil || len(c.rewrites) == 0 {
-		return ""
+	if entry, ok := c.lookup(model); ok {
+		return entry.Upstream
 	}
-	return c.rewrites[normalizeModel(model)]
+	return ""
+}
+
+// aliasFor returns the client-facing name for a requested model; unknown models
+// fall back to the normalised request so routing stays predictable.
+func (c *pluginConfig) aliasFor(model string) string {
+	if entry, ok := c.lookup(model); ok {
+		return entry.Alias
+	}
+	return normalizeModel(model)
 }
 
 // firstKey returns the configured API key ("" when none).

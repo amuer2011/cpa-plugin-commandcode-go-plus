@@ -45,7 +45,7 @@ const (
 	upstreamBaseURL = "https://api.commandcode.ai"
 )
 
-const pluginVersion = "1.2.9"
+const pluginVersion = "1.3.0"
 
 //go:embed assets/cmdsymbol-dark.svg
 var commandCodeLogo []byte
