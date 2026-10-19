@@ -111,7 +111,7 @@ func TestManagedAuth(t *testing.T) {
 	if key := p.executor.requestKey(nil, resp.Auth.Metadata, resp.Auth.Attributes); key != "test-key" {
 		t.Fatal("wrong selected credential")
 	}
-	route, err := p.RouteModel(context.Background(), pluginapi.ModelRouteRequest{RequestedModel: "deepseek-v4.1-flash"})
+	route, err := p.RouteModel(context.Background(), pluginapi.ModelRouteRequest{RequestedModel: "commandcode-go/deepseek-v4.1-flash"})
 	if err != nil || route.TargetKind != pluginapi.ModelRouteTargetProvider || route.Target != Provider || route.TargetModel != "commandcode-go/deepseek-v4.1-flash" {
 		t.Fatalf("managed route: %+v %v", route, err)
 	}

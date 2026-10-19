@@ -56,6 +56,7 @@ type modelEntry struct {
 	Display   string // human name published by the catalog
 	Context   int64  // context window in tokens (0 when unknown)
 	Tier      string // minimum plan tier ("go".."max"), "" when unknown
+	Vendor    string // vendor family, e.g. "deepseek", "openai", "anthropic"
 	Available bool   // false when the vendor list advertises a model its backend refuses
 }
 
@@ -133,6 +134,7 @@ func entriesFromCatalog(models []catalogModel) []modelEntry {
 			Display:   strings.TrimSpace(model.Name),
 			Context:   model.ContextLength,
 			Tier:      modelTier(upstream),
+			Vendor:    vendorFamily(upstream),
 			Available: !modelUnavailable(upstream),
 		})
 	}
@@ -164,6 +166,7 @@ func entriesFromConfig(entries []ModelEntry) []modelEntry {
 			Alias:     strings.ToLower(alias),
 			Display:   display,
 			Tier:      modelTier(upstream),
+			Vendor:    vendorFamily(upstream),
 			Available: !modelUnavailable(upstream),
 		})
 	}
@@ -232,6 +235,24 @@ func catalogKey(model string) string {
 		name = strings.TrimSpace(name[:i])
 	}
 	return strings.ToLower(strings.TrimSpace(name))
+}
+
+// vendorFamily names the vendor a catalog entry belongs to, so whole families
+// can be hidden. Namespaced ids use their first segment; namespace-less ids
+// (claude-*, gpt-*) are mapped to the vendor that publishes them.
+func vendorFamily(upstream string) string {
+	name := strings.TrimSpace(upstream)
+	if i := strings.Index(name, "/"); i > 0 {
+		return strings.ToLower(name[:i])
+	}
+	lower := strings.ToLower(name)
+	switch {
+	case strings.HasPrefix(lower, "claude"):
+		return "anthropic"
+	case strings.HasPrefix(lower, "gpt"):
+		return "openai"
+	}
+	return ""
 }
 
 // baseModel returns the last path segment of a model id.

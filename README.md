@@ -30,11 +30,14 @@
 模型列表不再写死在代码里，默认从 `GET https://api.commandcode.ai/provider/v1/models` 拉取（10 分钟缓存）；插件启动时先用构建期快照 [`assets/models-snapshot.json`](assets/models-snapshot.json) 兜底，该文件可用同一条接口的返回重新生成。
 
 - 模型 ID 为 `commandcode-go/<上游短名>`，例如 `commandcode-go/deepseek-v4.1-flash-fast`；也接受完整上游名 `commandcode-go/deepseek/deepseek-v4.1-flash-fast`，大小写不敏感，`(high)` 这类推理后缀会被忽略。
+- **只在 `commandcode-go/` 命名空间内接管路由**：裸名 `gpt-5.4`、`claude-sonnet-5-5` 一律交回 CPA 自己的 Codex / Claude 账号，不会被本插件截走。想用 CommandCode 的副本就带上前缀请求。
+- **默认不展示 Codex / Claude / Gemini 的模型**（`openai`、`anthropic`、`google` 三个厂商），因为 CPA 通常已经有对应账号，重复列出来只会污染模型选择器。被隐藏的模型仍然可以 `commandcode-go/<id>` 显式调用。用 `exclude_vendors: []` 可全部放出，或自定义列表（例如 `[openai, xai]`）。默认口径：目录 93 个 → 展示 56 个 → Go 套餐 47 个。
 - **按账号套餐过滤**：`ModelsForAuth` 用该账号的 API Key 读取 `/alpha/whoami`、`/alpha/billing/subscriptions`、`/alpha/billing/credits`（5 分钟缓存），只列出当前套餐能跑的模型。有按量余额（`purchasedCredits + freeCredits > 0`）时不过滤；查不到套餐时也不过滤（fail-open），不会因计费接口抖动把列表清空。
 - 套餐档位映射在 [`assets/model-tiers.json`](assets/model-tiers.json)（模型 → 最低套餐），与官方 plan 页面同步；`/provider/v1/models` 本身不带套餐信息，所以这份数据必须随版本更新。
 - 网关缺后端或地区受限的模型记在 `assets/model-tiers.json` 的 `unavailable` 里：列表不展示，但仍可显式调用（会拿到上游错误）。2026-10-19 用 Go 账号逐条实测，当前 9 条。
 - 可选项：
-  - `models:` 显式白名单，写了就覆盖目录（旧的 `alias`/`name` 形式继续可用）；
+  - `models:` 显式白名单，写了就覆盖目录（旧的 `alias`/`name` 形式继续可用，裸 alias 也照旧接管）；
+  - `exclude_vendors: []` 放开全部厂商，或写 `[openai, xai]` 自定义隐藏范围；
   - `models_tier: go`（或 `goat`/`pro`/`provider`/`max`/`all`）限制 CPA 全局模型页展示的上限，默认 `all`；
   - `disable_plan_filter: true` 关闭按账号的套餐过滤。
 
@@ -88,10 +91,12 @@ This plugin connects a CommandCode Go subscription to CLIProxyAPI (CPA), allowin
 The model list is no longer hard-coded: it comes from `GET https://api.commandcode.ai/provider/v1/models` (10-minute cache). At startup the plugin falls back to the build-time snapshot in [`assets/models-snapshot.json`](assets/models-snapshot.json), which can be regenerated from the same endpoint.
 
 - Model IDs are `commandcode-go/<upstream short name>`, e.g. `commandcode-go/deepseek-v4.1-flash-fast`. The full upstream name (`commandcode-go/deepseek/deepseek-v4.1-flash-fast`) is accepted too; matching is case-insensitive and drops reasoning suffixes such as `(high)`.
+- **Routing stays inside the `commandcode-go/` namespace**: bare ids such as `gpt-5.4` or `claude-sonnet-5-5` always go back to CPA's own Codex/Claude accounts and are never captured by this plugin. Request the prefixed id to use CommandCode's copy.
+- **Codex/Claude/Gemini models are hidden by default** (`openai`, `anthropic`, `google` families) because a CPA deployment usually reaches those through its own accounts; listing them again only pollutes the model picker. Hidden models remain callable as `commandcode-go/<id>`. Set `exclude_vendors: []` to show everything, or pass a custom list such as `[openai, xai]`. Default scope: 93 catalog models → 56 advertised → 47 for a Go plan.
 - **Plan filtering**: `ModelsForAuth` reads `/alpha/whoami`, `/alpha/billing/subscriptions` and `/alpha/billing/credits` with the credential's key (5-minute cache) and lists only the models the current plan serves. On-demand credit (`purchasedCredits + freeCredits > 0`) disables filtering, and an unknown plan fails open, so a billing hiccup never blanks the list.
 - Plan tiers live in [`assets/model-tiers.json`](assets/model-tiers.json) (model → minimum plan), synced with the official plan pages. `/provider/v1/models` carries no plan data, so this file must ship with each release.
 - Models the vendor's backend refuses (missing backend, regional restriction) are listed under `unavailable` in `assets/model-tiers.json`: hidden from the picker but still routable. Probed one by one with a Go key on 2026-10-19; nine entries today.
-- Optional knobs: `models:` is an explicit allowlist that overrides the catalog (the old `alias`/`name` form still works); `models_tier: go` (or `goat`/`pro`/`provider`/`max`/`all`) caps the global CPA model page; `disable_plan_filter: true` turns per-account filtering off.
+- Optional knobs: `models:` is an explicit allowlist that overrides the catalog (the old `alias`/`name` form still works, bare aliases keep being captured); `exclude_vendors: []` shows every vendor, or pass a custom list like `[openai, xai]`; `models_tier: go` (or `goat`/`pro`/`provider`/`max`/`all`) caps the global CPA model page; `disable_plan_filter: true` turns per-account filtering off.
 
 ## Manual API Key login
 

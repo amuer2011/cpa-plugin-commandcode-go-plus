@@ -47,12 +47,23 @@ type pluginConfig struct {
 	// ModelsForAuth, so every catalog model is listed regardless of plan.
 	DisablePlanFilter bool `yaml:"disable_plan_filter"`
 
+	// ExcludeVendors hides whole vendor families from the advertised list.
+	// Unset uses the default families (openai/anthropic/google) — the ones a
+	// typical CPA deployment already serves through its own Codex, Claude or
+	// Gemini accounts. An explicit empty list (`[]`) keeps every family.
+	// Hidden models stay routable, so `commandcode-go/claude-sonnet-5-5` still
+	// works for anyone who wants CommandCode's copy.
+	ExcludeVendors []string `yaml:"exclude_vendors"`
+
 	// index is the live model snapshot. It starts as the embedded catalog and
 	// is replaced wholesale after a successful refresh, so readers always see
 	// a consistent map without locking per lookup.
 	indexMu   sync.RWMutex
 	index     *modelIndex
 	refreshMu sync.Mutex
+
+	// blockedVendors is derived from ExcludeVendors at parse time (nil-safe).
+	blockedVendors map[string]struct{}
 }
 
 // ModelEntry maps a client-facing alias to the name the vendor serves.
@@ -101,8 +112,64 @@ func parseConfig(raw []byte) *pluginConfig {
 	if len(raw) > 0 {
 		_ = yaml.Unmarshal(raw, cfg)
 	}
+	cfg.blockedVendors = cfg.resolveExcludedVendors()
 	cfg.index = cfg.initialIndex()
 	return cfg
+}
+
+// defaultExcludedVendors are the families a CPA deployment usually serves from
+// its own provider accounts. CommandCode resells the same models, so listing
+// them again would duplicate ids the user already has (and confuse model
+// pickers that key on the bare name).
+var defaultExcludedVendors = []string{"openai", "anthropic", "google"}
+
+// resolveExcludedVendors turns the YAML knob into a lookup set. Unset means the
+// defaults; an explicit empty list means "keep every vendor".
+func (c *pluginConfig) resolveExcludedVendors() map[string]struct{} {
+	names := defaultExcludedVendors
+	if c != nil && c.ExcludeVendors != nil {
+		names = c.ExcludeVendors
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
+			set[name] = struct{}{}
+		}
+	}
+	return set
+}
+
+// vendorExcluded reports whether a vendor family is hidden from the list.
+func (c *pluginConfig) vendorExcluded(vendor string) bool {
+	if c == nil || vendor == "" {
+		return false
+	}
+	_, ok := c.blockedVendors[vendor]
+	return ok
+}
+
+// ownsModel reports whether a client-requested model belongs to this plugin.
+//
+// Catalog mode only claims namespaced ids (`commandcode-go/...`): the catalog
+// carries models other providers also serve (gpt-*, claude-*, ...), and claiming
+// their bare names would hijack requests meant for a native Codex/Claude auth.
+// An explicit `models:` list keeps the old behaviour and owns its bare aliases.
+func (c *pluginConfig) ownsModel(model string) bool {
+	if _, ok := c.lookup(model); !ok {
+		return false
+	}
+	if c.catalogEnabled() && !hasProviderPrefix(model) {
+		return false
+	}
+	return true
+}
+
+// hasProviderPrefix reports whether the model already carries our namespace.
+func hasProviderPrefix(model string) bool {
+	model = strings.TrimSpace(model)
+	return len(model) > len(Provider) &&
+		strings.EqualFold(model[:len(Provider)], Provider) &&
+		model[len(Provider)] == '/'
 }
 
 // initialIndex seeds the snapshot: the operator's explicit list when one is

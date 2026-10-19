@@ -186,7 +186,8 @@ func TestRefreshCatalogCachesAndFallsBack(t *testing.T) {
 }
 
 func TestModelsForAuthFiltersByPlan(t *testing.T) {
-	cfg := parseConfig(nil)
+	// Vendor exclusions are off here: this test isolates the plan filter.
+	cfg := parseConfig([]byte("exclude_vendors: []\n"))
 	cfg.setModelIndex(newModelIndex(entriesFromCatalog(testCatalog()), time.Time{}))
 	provider := NewModelProvider(cfg)
 
@@ -220,12 +221,14 @@ func TestModelsForAuthFiltersByPlan(t *testing.T) {
 	}
 
 	proClient := &fakeHTTP{routes: map[string]string{
-		catalogPath:              `{"object":"list","data":[{"id":"claude-sonnet-5-5","name":"Claude Sonnet 5.5","context_length":1000000}]}`,
+		catalogPath: `{"object":"list","data":[` +
+			`{"id":"deepseek/deepseek-v4.1-flash-fast","name":"DeepSeek V4.1 Flash Fast (latest)","context_length":1000000},` +
+			`{"id":"claude-sonnet-5-5","name":"Claude Sonnet 5.5","context_length":1000000}]}`,
 		"/alpha/whoami":          `{"org":{"id":"org-1"}}`,
 		"/subscriptions":         `{"data":{"planId":"individual-pro-v1","status":"active"}}`,
 		"/alpha/billing/credits": `{"credits":{"planId":"individual-pro-v1"}}`,
 	}}
-	proCfg := parseConfig(nil)
+	proCfg := parseConfig([]byte("exclude_vendors: []\n"))
 	proCfg.setModelIndex(newModelIndex(entriesFromCatalog(testCatalog()), time.Time{}))
 	proResp, err := NewModelProvider(proCfg).ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{
 		StorageJSON: []byte(`{"api_key":"pro-key"}`),
@@ -234,7 +237,7 @@ func TestModelsForAuthFiltersByPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(proResp.Models) != 1 || proResp.Models[0].ID != "commandcode-go/claude-sonnet-5-5" {
+	if len(proResp.Models) != 2 {
 		t.Fatalf("pro account models = %+v", proResp.Models)
 	}
 }
@@ -252,29 +255,77 @@ func TestAccountAccessFallsBackToCreditsPlanID(t *testing.T) {
 }
 
 func TestUnavailableModelsAreHiddenButRoutable(t *testing.T) {
-	models := embeddedCatalog()
-	entries := entriesFromCatalog(models)
-	visible := advertised(entries)
-	hidden := unavailableIDs()
-	if len(hidden) == 0 {
+	cfg := parseConfig(nil)
+	entries := entriesFromCatalog(embeddedCatalog())
+	visible := advertised(entries, cfg)
+	if len(unavailableIDs()) == 0 {
 		t.Fatal("tier data declares no unavailable models")
-	}
-	if len(visible) != len(entries)-len(hidden) {
-		t.Fatalf("advertised %d of %d entries, want %d hidden", len(visible), len(entries), len(hidden))
 	}
 	for _, entry := range visible {
 		if modelUnavailable(entry.Upstream) {
 			t.Fatalf("unavailable model advertised: %s", entry.Upstream)
 		}
 	}
+	for _, hidden := range []string{"zai-org/GLM-5.1", "Qwen/Qwen3.6-Max-Preview"} {
+		for _, entry := range visible {
+			if entry.Upstream == hidden {
+				t.Fatalf("%s should be hidden", hidden)
+			}
+		}
+	}
 	// Hidden models stay routable: an explicit request still reaches the
 	// executor, so a vendor fix does not require a plugin release.
-	cfg := parseConfig(nil)
-	if got := cfg.upstreamName("glm-5.1"); got != "zai-org/GLM-5.1" {
+	if got := cfg.upstreamName("commandcode-go/zai-org/GLM-5.1"); got != "zai-org/GLM-5.1" {
 		t.Fatalf("hidden model lost its route: %q", got)
 	}
 	if modelTier("zai-org/GLM-5.1") == "" {
 		t.Fatal("hidden model lost its tier")
+	}
+}
+
+func TestVendorFamiliesAreHiddenByDefault(t *testing.T) {
+	entries := entriesFromCatalog(embeddedCatalog())
+	cfg := parseConfig(nil)
+	visible := advertised(entries, cfg)
+	for _, entry := range visible {
+		if cfg.vendorExcluded(entry.Vendor) {
+			t.Fatalf("excluded vendor leaked: %s (%s)", entry.Upstream, entry.Vendor)
+		}
+	}
+	for _, hidden := range []string{"gpt-5.4", "claude-sonnet-5-5", "google/gemini-3.5-flash"} {
+		for _, entry := range visible {
+			if entry.Upstream == hidden {
+				t.Fatalf("%s should be hidden by the default vendor scope", hidden)
+			}
+		}
+	}
+	// `exclude_vendors: []` opts back in to the full catalog.
+	all := parseConfig([]byte("exclude_vendors: []\n"))
+	if got := len(advertised(entries, all)); got <= len(visible) {
+		t.Fatalf("explicit empty vendor list did not widen the catalog: %d <= %d", got, len(visible))
+	}
+}
+
+func TestRouterClaimsOnlyNamespacedModels(t *testing.T) {
+	_, p := Build([]byte("auth_files: true\n"))
+	cases := map[string]bool{
+		"gpt-5.4":                            false, // native Codex model, must fall through
+		"claude-sonnet-5-5":                  false, // native Claude model
+		"deepseek-v4.1-flash":                false, // bare alias is not advertised any more
+		"commandcode-go/deepseek-v4.1-flash": true,
+		"commandcode-go/gpt-5.4":             true, // hidden but still routable on request
+	}
+	for requested, want := range cases {
+		route, err := p.RouteModel(context.Background(), pluginapi.ModelRouteRequest{RequestedModel: requested})
+		if err != nil {
+			t.Fatalf("%s: %v", requested, err)
+		}
+		if route.Handled != want {
+			t.Fatalf("route(%q).Handled = %v, want %v", requested, route.Handled, want)
+		}
+		if want && route.TargetModel != "commandcode-go/"+strings.ToLower(baseModel(requested)) {
+			t.Fatalf("route(%q).TargetModel = %q", requested, route.TargetModel)
+		}
 	}
 }
 

@@ -40,7 +40,7 @@ func (p *ModelProvider) StaticModels(context.Context, pluginapi.StaticModelReque
 	if index == nil {
 		return modelResponse(nil), nil
 	}
-	entries := advertised(index.entries)
+	entries := advertised(index.entries, p.cfg)
 	if maxWeight, ok := p.cfg.staticTierWeight(); ok {
 		entries = filterByTier(entries, maxWeight)
 	}
@@ -60,7 +60,7 @@ func (p *ModelProvider) ModelsForAuth(ctx context.Context, req pluginapi.AuthMod
 	if index == nil {
 		return modelResponse(nil), nil
 	}
-	entries := advertised(index.entries)
+	entries := advertised(index.entries, p.cfg)
 	if p.cfg.planFilterEnabled() && p.cfg.catalogEnabled() {
 		if access, ok := p.accountAccess(ctx, req, key); ok {
 			entries = filterByAccess(entries, access)
@@ -69,15 +69,20 @@ func (p *ModelProvider) ModelsForAuth(ctx context.Context, req pluginapi.AuthMod
 	return modelResponse(entries), nil
 }
 
-// advertised drops catalog entries the vendor's backend cannot serve. They stay
-// routable (an explicit request still reaches the executor) but never show up in
-// a model list.
-func advertised(entries []modelEntry) []modelEntry {
+// advertised drops catalog entries that must not appear in a model list:
+// models the vendor's backend cannot serve, and vendor families this CPA
+// already reaches through its own accounts. Both stay routable — an explicit
+// `commandcode-go/<id>` request still reaches the executor.
+func advertised(entries []modelEntry, cfg *pluginConfig) []modelEntry {
 	out := make([]modelEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Available {
-			out = append(out, entry)
+		if !entry.Available {
+			continue
 		}
+		if cfg.catalogEnabled() && cfg.vendorExcluded(entry.Vendor) {
+			continue
+		}
+		out = append(out, entry)
 	}
 	return out
 }

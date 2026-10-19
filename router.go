@@ -21,7 +21,7 @@ func (r *Router) owned(req pluginapi.ModelRouteRequest) bool {
 		if candidate == "" {
 			continue
 		}
-		if _, ok := r.cfg.lookup(candidate); ok {
+		if r.cfg.ownsModel(candidate) {
 			return true
 		}
 	}
