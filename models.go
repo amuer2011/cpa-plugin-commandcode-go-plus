@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +117,75 @@ func credentialCacheKey(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// visionModels is the set of upstream model ids that accept image input,
+// keyed by lowercase id. It mirrors the DSH plugin's KNOWN_MODALITIES
+// snapshot, which is derived from the official Command Code CLI model
+// registry (inputModalities). Models absent from this set are treated as
+// text-only: the registry is the authority, and guessing from a name would
+// let the host send images to a model that rejects them.
+var visionModels = map[string]bool{
+	"claude-fable-5":                        true,
+	"claude-fable-5-1":                      true,
+	"claude-haiku-4-5-20251001":             true,
+	"claude-opus-4-7":                       true,
+	"claude-opus-4-8":                       true,
+	"claude-opus-5":                         true,
+	"claude-sonnet-4-6":                     true,
+	"claude-sonnet-5":                       true,
+	"deepseek/deepseek-v4-flash-vision-exp": true,
+	"deepseek/deepseek-v4.1-flash":          true,
+	"google/gemini-3.1-flash-lite":          true,
+	"google/gemini-3.5-flash":               true,
+	"google/gemini-3.5-flash-lite":          true,
+	"google/gemini-3.6-flash":               true,
+	"google/gemini-3.7-flash":               true,
+	"google/gemini-3.8-flash":               true,
+	"gpt-5.3-codex":                         true,
+	"gpt-5.4":                               true,
+	"gpt-5.4-mini":                          true,
+	"gpt-5.5":                               true,
+	"gpt-5.6-luna":                          true,
+	"gpt-5.6-sol":                           true,
+	"gpt-5.6-terra":                         true,
+	"gpt-6-astra":                           true,
+	"meta/muse-spark-1.1":                   true,
+	"meta/muse-spark-1.2":                   true,
+	"meta/muse-spark-1.2-contributor":       true,
+	"meta/muse-spark-1.3":                   true,
+	"meta/muse-spark-1.3-contributor":       true,
+	"minimax/minimax-m3-free":               true,
+	"minimaxai/minimax-m3":                  true,
+	"moonshotai/kimi-k2.5":                  true,
+	"moonshotai/kimi-k2.6":                  true,
+	"moonshotai/kimi-k2.7-code":             true,
+	"moonshotai/kimi-k2.7-code-highspeed":   true,
+	"moonshotai/kimi-k3":                    true,
+	"qwen/qwen3.6-plus":                     true,
+	"qwen/qwen3.7-flash":                    true,
+	"qwen/qwen3.7-plus":                     true,
+	"qwen/qwen3.8-27b":                      true,
+	"qwen/qwen3.8-flash":                    true,
+	"qwen/qwen3.8-max":                      true,
+	"qwen/qwen3.8-max-0902":                 true,
+	"sakana/fugu-ultra":                     true,
+	"stepfun/step-3.7-flash":                true,
+	"thinkingmachines/inkling":              true,
+	"thinkingmachines/inkling-small":        true,
+	"xai/grok-4.5":                          true,
+	"xai/grok-4.6":                          true,
+	"xiaomi/mimo-v2.5":                      true,
+	"z-ai/glm-5.3-flash":                    true,
+}
+
+// supportedModalities returns the input modalities a model accepts, from the
+// CLI registry snapshot. Unknown ids default to text-only.
+func supportedModalities(upstream string) []string {
+	if visionModels[strings.ToLower(strings.TrimSpace(upstream))] {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
+}
+
 // modelResponse turns catalogue entries into registry models. IDs use the
 // commandcode-go namespace deliberately: the host skips plugin models that any
 // native executor already serves, so reusing bare vendor names could leave this
@@ -138,7 +208,7 @@ func modelResponse(entries []modelEntry) pluginapi.ModelResponse {
 			Description:                entry.Upstream + " via CommandCode Go",
 			InputTokenLimit:            entry.Context,
 			SupportedGenerationMethods: []string{"chatCompletions"},
-			SupportedInputModalities:   []string{"text"},
+			SupportedInputModalities:   supportedModalities(entry.Upstream),
 			SupportedOutputModalities:  []string{"text"},
 			SupportedParameters:        []string{"temperature", "top_p", "max_tokens", "stop", "tools", "reasoning_effort"},
 			Thinking: &pluginapi.ThinkingSupport{
