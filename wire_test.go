@@ -31,8 +31,9 @@ func TestBuildGenerateBody_SystemAndUser(t *testing.T) {
 			Messages    []struct {
 				Role    string `json:"role"`
 				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
+					Type  string `json:"type"`
+					Text  string `json:"text"`
+					Image string `json:"image"`
 				} `json:"content"`
 			} `json:"messages"`
 		} `json:"params"`
@@ -57,13 +58,12 @@ func TestBuildGenerateBody_SystemAndUser(t *testing.T) {
 		t.Fatalf("messages = %+v", body.Params.Messages)
 	}
 	parts := body.Params.Messages[0].Content
-	// text + image_url flatten into one text block; the image degrades to a
-	// marker because the generate wire has no inline image form.
-	if len(parts) != 1 || parts[0].Type != "text" {
+	// text + image_url serialize to one text part and one gateway image part.
+	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "hi" {
 		t.Fatalf("user parts = %+v", parts)
 	}
-	if !strings.Contains(parts[0].Text, "hi") || !strings.Contains(parts[0].Text, "[image omitted") {
-		t.Errorf("user text = %q", parts[0].Text)
+	if parts[1].Type != "image" || parts[1].Image != "data:image/png;base64,xx" {
+		t.Errorf("image part = %+v", parts[1])
 	}
 }
 

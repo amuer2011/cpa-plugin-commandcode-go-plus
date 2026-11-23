@@ -48,35 +48,105 @@ type openaiToolCall struct {
 	} `json:"function"`
 }
 
-// contentText flattens an OpenAI content field (string or part array) into
-// plain text. Images degrade to a marker: the /alpha/generate wire carries
-// images only through the vendor's durable attachment service, which an
-// external proxy cannot fabricate.
-func contentText(raw json.RawMessage) string {
+// openaiContentPart is one block of an OpenAI content array.
+type openaiContentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	ImageURL *struct {
+		URL string `json:"url"`
+	} `json:"image_url"`
+	// Image is the gateway-format passthrough ({type:"image", image:"data:..."}).
+	Image string `json:"image"`
+}
+
+// maxImageDataURLBytes caps a single image data URL (base64 payload
+// included). 20 MiB covers multi-megapixel photos while keeping one
+// request bounded.
+const maxImageDataURLBytes = 20 << 20
+
+// parseContentParts unmarshals an OpenAI content field. A JSON string yields
+// one text part; a part array yields its blocks; anything else yields none.
+func parseContentParts(raw json.RawMessage) []openaiContentPart {
 	if len(raw) == 0 {
-		return ""
+		return nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		if s == "" {
+			return nil
+		}
+		return []openaiContentPart{{Type: "text", Text: s}}
 	}
-	var parts []struct {
-		Type     string `json:"type"`
-		Text     string `json:"text"`
-		ImageURL *struct {
-			URL string `json:"url"`
-		} `json:"image_url"`
-	}
+	var parts []openaiContentPart
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		return ""
+		return nil
 	}
+	return parts
+}
+
+// resolveImageURL validates an image reference for the gateway. Only data:
+// image URLs are accepted: the gateway takes a bare data URL, and this
+// transport has no download step, so a remote http(s) URL is rejected with
+// a clear error instead of being passed through as-is.
+func resolveImageURL(url string) (string, error) {
+	u := strings.TrimSpace(url)
+	switch {
+	case strings.HasPrefix(u, "data:image/"):
+		if !strings.Contains(u, ";base64,") {
+			return "", fmt.Errorf("commandcode-go: image data URL must be base64-encoded (data:<media-type>;base64,...)")
+		}
+		if len(u) > maxImageDataURLBytes {
+			return "", fmt.Errorf("commandcode-go: image data URL exceeds %d bytes", maxImageDataURLBytes)
+		}
+		return u, nil
+	case strings.HasPrefix(u, "data:"):
+		return "", fmt.Errorf("commandcode-go: unsupported image data URL media type (only data:image/* is accepted)")
+	case strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://"):
+		return "", fmt.Errorf("commandcode-go: remote image URLs are not supported; download the image and send it as a data: URL")
+	default:
+		return "", fmt.Errorf("commandcode-go: unsupported image URL (expected a data:image/...;base64 URL)")
+	}
+}
+
+// contentParts parses an OpenAI content field into gateway parts, preserving
+// text and converting image_url parts into the gateway's
+// {type:"image", image:"data:..."} form (the same shape the DSH plugin
+// sends). It returns an error for image parts that cannot be sent, so a bad
+// image fails loudly instead of being silently dropped.
+func contentParts(raw json.RawMessage) ([]ccPart, error) {
+	out := make([]ccPart, 0)
+	for _, p := range parseContentParts(raw) {
+		switch {
+		case p.Type == "image_url" && p.ImageURL != nil:
+			dataURL, err := resolveImageURL(p.ImageURL.URL)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, ccPart{Type: "image", Image: dataURL})
+		case p.Type == "image" && p.Image != "":
+			dataURL, err := resolveImageURL(p.Image)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, ccPart{Type: "image", Image: dataURL})
+		case p.Text != "":
+			out = append(out, ccPart{Type: "text", Text: p.Text})
+		}
+	}
+	return out, nil
+}
+
+// contentText flattens an OpenAI content field into plain text, for roles
+// the gateway keeps text-only (system, assistant, tool results). Image parts
+// degrade to an explicit marker instead of being silently dropped.
+func contentText(raw json.RawMessage) string {
 	var b strings.Builder
-	for _, p := range parts {
+	for _, p := range parseContentParts(raw) {
 		switch {
 		case p.Text != "":
 			b.WriteString(p.Text)
-		case p.ImageURL != nil:
-			b.WriteString("\n[image omitted: the commandcode-go transport does not support images]\n")
+		case p.Type == "image_url" && p.ImageURL != nil, p.Type == "image" && p.Image != "":
+			b.WriteString("\n[image omitted: images are only supported in user messages]\n")
 		}
 	}
 	return b.String()
@@ -98,11 +168,13 @@ func (r *openaiRequest) maxTokens() int64 {
 // ---- /alpha/generate request building --------------------------------------
 
 // ccPart is one content block of a generate-wire message. Which fields are
-// populated depends on Type: text/reasoning carry Text; tool-call carries
-// ToolCallID/ToolName/Input; tool-result carries ToolCallID/ToolName/Output.
+// populated depends on Type: text/reasoning carry Text; image carries a
+// base64 data URL in Image; tool-call carries ToolCallID/ToolName/Input;
+// tool-result carries ToolCallID/ToolName/Output.
 type ccPart struct {
 	Type       string         `json:"type"`
 	Text       string         `json:"text,omitempty"`
+	Image      string         `json:"image,omitempty"`
 	ToolCallID string         `json:"toolCallId,omitempty"`
 	ToolName   string         `json:"toolName,omitempty"`
 	Input      map[string]any `json:"input,omitempty"`
@@ -168,9 +240,12 @@ func buildGenerateBody(upstreamModel string, payload []byte) ([]byte, error) {
 				system.WriteString(t)
 			}
 		case "user":
-			if t := contentText(m.Content); t != "" {
-				messages = append(messages, ccMessage{Role: "user",
-					Content: []ccPart{{Type: "text", Text: t}}})
+			parts, err := contentParts(m.Content)
+			if err != nil {
+				return nil, err
+			}
+			if len(parts) > 0 {
+				messages = append(messages, ccMessage{Role: "user", Content: parts})
 			}
 		case "assistant":
 			var parts []ccPart
